@@ -1,0 +1,17 @@
+# Build output
+/hostlint
+/dist/
+*.test
+*.out
+coverage.*
+
+# Local only — never commit
+CLAUDE.local.md
+/.claude/
+.env
+.env.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
