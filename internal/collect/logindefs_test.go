@@ -1,0 +1,121 @@
+package collect
+
+import (
+	"io/fs"
+	"strings"
+	"testing"
+
+	"github.com/with-developer/hostlint/internal/facts"
+	"github.com/with-developer/hostlint/internal/hostfs"
+)
+
+func TestLoginDefs(t *testing.T) {
+	const debian = "# comment\nMAIL_DIR        /var/mail\nPASS_MAX_DAYS\t99999\nPASS_MIN_DAYS\t0\nPASS_MAX_DAYS 30\nENCRYPT_METHOD SHA512\n"
+	f, err := collect(t, loginDefsCollector{}, hostfs.NewMemFS().AddFile("/etc/login.defs", debian, 0o644, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ld := f.Value.(*LoginDefs)
+	want := map[string]facts.Setting{
+		// The last occurrence wins, like shadow-utils.
+		"PASS_MAX_DAYS":  {Value: "30", Explicit: true, Source: "/etc/login.defs:5"},
+		"PASS_MIN_DAYS":  {Value: "0", Explicit: true, Source: "/etc/login.defs:4"},
+		"ENCRYPT_METHOD": {Value: "SHA512", Explicit: true, Source: "/etc/login.defs:6"},
+		"MAIL_DIR":       {Value: "/var/mail", Explicit: true, Source: "/etc/login.defs:2"},
+		// Absent keys with a documented default.
+		"PASS_WARN_AGE": {Value: "-1", Source: "default (login.defs(5))"},
+		"UMASK":         {Value: "022", Source: "default (login.defs(5))"},
+	}
+	if !ld.Present || len(ld.Settings) != len(want) {
+		t.Fatalf("present %v, settings %v", ld.Present, ld.Settings)
+	}
+	for k, w := range want {
+		if ld.Settings[k] != w {
+			t.Errorf("%s = %+v, want %+v", k, ld.Settings[k], w)
+		}
+	}
+}
+
+func TestLoginDefsMissingAndUnreadable(t *testing.T) {
+	f, err := collect(t, loginDefsCollector{}, hostfs.NewMemFS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ld := f.Value.(*LoginDefs)
+	// Without the file the defaults apply: "no limit" is a FAIL for a max-age check, never a PASS.
+	if ld.Present || ld.Settings["PASS_MAX_DAYS"].Value != "-1" || ld.Settings["PASS_MAX_DAYS"].Explicit {
+		t.Errorf("missing login.defs: %+v", ld)
+	}
+	if _, ok := ld.Settings["ENCRYPT_METHOD"]; ok {
+		t.Error("ENCRYPT_METHOD has no documented default and must stay unknown")
+	}
+	_, err = collect(t, loginDefsCollector{}, hostfs.NewMemFS().AddFile("/etc/login.defs", "", 0o600, 0, 0).SetError("/etc/login.defs", fs.ErrPermission))
+	if err == nil {
+		t.Error("an unreadable login.defs must be an error")
+	}
+}
+
+// shadow-utils parses numbers with strtol base 0 and rejects partial numbers.
+func TestLoginDefsNumbers(t *testing.T) {
+	m := hostfs.NewMemFS().AddFile("/etc/login.defs",
+		"PASS_MAX_DAYS 090\nPASS_MIN_DAYS 010\nPASS_WARN_AGE 0x7\nPASS_MIN_LEN 8 # chars\nUID_MIN -1\nUMASK 027\n", 0o644, 0, 0)
+	f, err := collect(t, loginDefsCollector{}, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := f.Value.(*LoginDefs).Settings
+	want := map[string]string{
+		"PASS_MAX_DAYS": "invalid: 090", "PASS_MIN_DAYS": "8", "PASS_WARN_AGE": "7",
+		"PASS_MIN_LEN": "invalid: 8 # chars", "UID_MIN": "-1",
+		"UMASK": "027", // not a number key: kept as written
+	}
+	for k, w := range want {
+		if s[k].Value != w {
+			t.Errorf("%s = %q, want %q", k, s[k].Value, w)
+		}
+	}
+}
+
+// shadow-utils keeps the last value; built with libeconf (RHEL 10) it keeps
+// the first and applies /etc/login.defs.d drop-ins.
+func TestLoginDefsEconf(t *testing.T) {
+	const defs = "PASS_MAX_DAYS 99999\nPASS_MAX_DAYS 90\nPASS_MIN_DAYS 7\n"
+	classic := hostfs.NewMemFS().AddFile("/etc/login.defs", defs, 0o644, 0, 0).
+		AddFile("/usr/sbin/useradd", "libc.so.6\n", 0o755, 0, 0)
+	econf := hostfs.NewMemFS().AddFile("/etc/login.defs", defs, 0o644, 0, 0).
+		AddFile("/usr/sbin/useradd", "libeconf.so.0\n", 0o755, 0, 0).
+		AddFile("/etc/login.defs.d/50-site.defs", "PASS_MIN_DAYS 1\n", 0o644, 0, 0)
+	tests := []struct {
+		name         string
+		fsys         *hostfs.MemFS
+		maxDays, min string
+	}{
+		{"classic", classic, "90", "7"},
+		{"libeconf", econf, "99999", "1"},
+	}
+	for _, tt := range tests {
+		f, err := collect(t, loginDefsCollector{}, tt.fsys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := f.Value.(*LoginDefs).Settings
+		if s["PASS_MAX_DAYS"].Value != tt.maxDays || s["PASS_MIN_DAYS"].Value != tt.min {
+			t.Errorf("%s: PASS_MAX_DAYS %+v, PASS_MIN_DAYS %+v", tt.name, s["PASS_MAX_DAYS"], s["PASS_MIN_DAYS"])
+		}
+	}
+}
+
+// getdef.c ignores a key without a value, ends a value at a quote, and
+// trims only ASCII whitespace.
+func TestLoginDefsParsing(t *testing.T) {
+	m := hostfs.NewMemFS().AddFile("/etc/login.defs",
+		"PASS_MAX_DAYS 90\nPASS_MAX_DAYS\nPASS_MIN_DAYS \"7\" trailing\nPASS_WARN_AGE\t14\u00a0\n", 0o644, 0, 0)
+	f, err := collect(t, loginDefsCollector{}, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := f.Value.(*LoginDefs).Settings
+	if s["PASS_MAX_DAYS"].Value != "90" || s["PASS_MIN_DAYS"].Value != "7" || !strings.HasPrefix(s["PASS_WARN_AGE"].Value, "invalid: ") {
+		t.Errorf("settings = %+v", s)
+	}
+}
