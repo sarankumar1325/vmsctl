@@ -604,3 +604,35 @@ func TestPAMSuPermissions(t *testing.T) {
 		t.Errorf("complete %v, unknown %v, err %v", f.Complete, f.Unknown, err)
 	}
 }
+
+// A passwd stack whose password is set by another module, or that never
+// reaches pam_unix, leaves the hash undecided; a stack with pam_unix and a
+// stack with no password rules at all do not.
+func TestPAMPasswordHashUnreachedUnix(t *testing.T) {
+	tests := []struct {
+		name, passwd string
+		unknown      bool
+	}{
+		{"pam_unix reached", "password required pam_unix.so sha512\n", false},
+		{"sss first and sufficient", "password sufficient pam_sss.so\npassword required pam_unix.so md5\n", true},
+		{"only sss", "password required pam_sss.so\n", true},
+		{"no password rules", "auth required pam_unix.so\n", false},
+		{"only a pam_unix of another type", "auth required pam_unix.so\npassword requisite pam_deny.so\n", false},
+		{"password changes are denied", "password requisite pam_deny.so\n", false},
+		{"pam_deny before pam_unix", "password requisite pam_deny.so\npassword required pam_unix.so sha512\n", false},
+		{"pam_unix then sss", "password required pam_unix.so sha512\npassword optional pam_sss.so\n", false},
+		{"reached without a hash option", "password required pam_unix.so\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := hostfs.NewMemFS().AddFile("/etc/pam.d/passwd", tt.passwd, 0o644, 0, 0)
+			f, err := collect(t, pamCollector{}, m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(f.Unknown, "effective.password_hash"); got != tt.unknown {
+				t.Errorf("unknown %v (%v), want %v", got, f.Unknown, tt.unknown)
+			}
+		})
+	}
+}
