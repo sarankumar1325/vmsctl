@@ -220,6 +220,9 @@ func TestShellEnvEffectiveTMOUT(t *testing.T) {
 		{"unset afterwards", "TMOUT=600\nunset TMOUT\n", ""},
 		{"read-only survives unset", "readonly TMOUT=600\nunset TMOUT\nTMOUT=0\n", "600"},
 		{"last wins", "TMOUT=600\nTMOUT=1800\n", "1800"},
+		{"leading zero is decimal to bash", "TMOUT=0600\n", "600"},
+		{"a plus sign is allowed", "TMOUT=+600\n", "600"},
+		{"zero with zeros stays zero", "TMOUT=000\n", "0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -418,11 +421,22 @@ func TestShellEnvContinuationEdges(t *testing.T) {
 
 	for name, profile := range map[string]string{
 		"list cut off by the end": "for i in /etc/profile.d/*.sh \\",
-		"runaway join":            strings.Repeat("x \\\n", maxJoinedLine),
+		"runaway join":            strings.Repeat(strings.Repeat("x", 63)+" \\\n", maxJoinedLine/32),
 	} {
 		m := hostfs.NewMemFS().AddFile("/etc/profile", profile, 0o644, 0, 0)
 		if f, err := collect(t, shellEnvCollector{}, m); err != nil || f.Complete {
 			t.Errorf("%s: complete %v, %v; want incomplete", name, f.Complete, err)
+		}
+	}
+}
+
+// A TMOUT bash does not read as a number is no timeout: its value is empty,
+// which the checks report, instead of the digits it starts with.
+func TestShellEnvTMOUTNotANumber(t *testing.T) {
+	for _, v := range []string{"600s", "0x10", "+", "99999999999999999999", "$((10*60))"} {
+		env := shellEnv(t, hostfs.NewMemFS().AddFile("/etc/profile", "TMOUT="+v+"\n", 0o644, 0, 0))
+		if len(env.TMOUT) != 1 || env.TMOUT[0].Value != "" {
+			t.Errorf("TMOUT=%s: %+v, want an empty value", v, env.TMOUT)
 		}
 	}
 }
