@@ -23,10 +23,14 @@ Pre-v0.1. The layout below is the target; keep this file in sync as code lands.
   pinned linter into `.tools/` on first run
 - `make fmt` — format the code
 - `make vuln` — govulncheck
+- `make snapshot` — build every release artifact into `dist/` without publishing (GoReleaser;
+  `SNAPSHOT_SKIP=sign,sbom` without syft); `scripts/check-release.sh dist` checks them.
+  Releases: [docs/RELEASING.md](docs/RELEASING.md)
 - `make e2e` — scan every supported distribution in Docker, stock and hardened (`e2e/harden.sh`),
-  and compare with the goldens in `e2e/testdata`; `E2E_RUN=debian-12 E2E_UPDATE=1` rewrites one
+  and compare with the goldens in `e2e/testdata`; `E2E_RUN=debian-12 E2E_UPDATE=1` rewrites the goldens of one distribution.
 
-CI runs test, lint, build (linux amd64/arm64) and vuln. `ci-ok` is the required check on `main`.
+CI runs test, lint, build (linux amd64/arm64), vuln and a release snapshot. `ci-ok` is the
+required check on `main`.
 
 ## Layout (target)
 
@@ -45,6 +49,9 @@ CI runs test, lint, build (linux amd64/arm64) and vuln. `ci-ok` is the required 
 | `profiles/` | Versioned control mappings per standard edition (e.g. `kisa-2026`), embedded |
 | `schema/` | JSON Schema of the result document (ADR 0006), with a valid example |
 | `testdata/` | Fixture root filesystems per distro (hardened and default) |
+| `install.sh` | The installer: downloads a release, verifies it, installs the binary |
+| `scripts/` | Release checks and lint guards (`check-release.sh`, `lint-guards.sh`) |
+| `.goreleaser.yaml` | Release build: archives, packages, SBOMs, checksums and signing (docs/RELEASING.md) |
 
 ## Security invariants — never violate
 
