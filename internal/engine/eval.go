@@ -319,6 +319,14 @@ func (e *evalEnv) evalSetting(cc *compiledCheck, params map[string]any, b *bindi
 }
 
 func compareSetting(spec *SettingSpec, lo, hi int64, value string) (bool, error) {
+	if facts.IsInvalid(value) {
+		// A value the program cannot read (login.defs "090") makes it fall
+		// back to its default: it never satisfies a check, and it is not an
+		// evaluation error. The checks that read such settings want values
+		// the default does not meet; a check whose range includes the default
+		// would need to compare it instead.
+		return false, nil
+	}
 	switch {
 	case len(spec.In) > 0:
 		return slices.Contains(spec.In, value), nil
