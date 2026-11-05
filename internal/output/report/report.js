@@ -229,6 +229,10 @@
       out.push(el('div', {class: 'callout warn'}, el('strong', {}, 'Waivers that did not apply'),
         el('ul', {}, h.waivers.map((w) => el('li', {}, w.scope + ' ' + w.id + ' (until ' + w.expires + '): ' + w.problem + ' — ' + w.reason)))));
     }
+    if (h.attestations && h.attestations.length) {
+      out.push(el('div', {class: 'callout warn'}, el('strong', {}, 'Attestations that did not apply'),
+        el('ul', {}, h.attestations.map((a) => el('li', {}, a.check + ' by ' + a.by + ' (until ' + a.expires + '): ' + a.problem)))));
+    }
     if (h.collectors && h.collectors.length) {
       out.push(el('div', {class: 'callout'}, el('strong', {}, 'Collectors that saw only part of the host'),
         el('ul', {}, h.collectors.map((c) => el('li', {}, el('code', {}, c.name), ' ' + c.status,
@@ -261,6 +265,8 @@
       hc.k.map((k) => check(h.checks[k])));
   }
 
+  const attestation = (a) => el('p', {class: 'waiver'}, 'Attested ' + a.status + ' by ' + a.by + ' on ' + a.at + ', until ' + a.expires + (a.note ? ': ' + a.note : ''));
+
   const waiver = (w) => el('p', {class: 'waiver'}, 'Waived (' + w.scope + (w.errors ? ', including errors' : '') + ') until ' + w.expires + ': ' + w.reason);
 
   function check(hk) {
@@ -270,6 +276,7 @@
       el('div', {class: 'check-head'}, badge(hk.s), ' ', el('code', {}, c.id), ' ', title(c),
         hk.o ? el('span', {class: 'muted'}, ' (was ' + NAME[hk.o] + ')') : null),
       hk.r ? el('p', {class: 'reason'}, str(hk.r)) : null,
+      hk.a ? attestation(hk.a) : null,
       hk.w ? waiver(hk.w) : null,
       c.params ? el('p', {class: 'muted small'}, 'Parameters: ' + JSON.stringify(c.params)) : null,
       hk.v ? el('p', {class: 'muted small'}, 'Looked at ' + plural(hk.v.count, 'item') + ' (' + hk.v.population + ')') : null,

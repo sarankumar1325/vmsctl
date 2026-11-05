@@ -194,21 +194,23 @@ type reportCheck struct {
 }
 
 type reportHost struct {
-	Name       string              `json:"name"`
-	File       string              `json:"file"`
-	OS         string              `json:"os"`
-	Supported  bool                `json:"supported"`
-	Kernel     string              `json:"kernel,omitempty"`
-	Arch       string              `json:"arch,omitempty"`
-	Labels     map[string]string   `json:"labels,omitempty"`
-	Scanned    string              `json:"scanned"`
-	Target     string              `json:"target"`
-	Root       bool                `json:"root"`
-	Tool       string              `json:"tool"`
-	Controls   []reportHostControl `json:"controls"`
-	Checks     []reportHostCheck   `json:"checks"`
-	Waivers    []engine.WaiverNote `json:"waivers,omitempty"`
-	Collectors []reportCollector   `json:"collectors,omitempty"`
+	Name      string              `json:"name"`
+	File      string              `json:"file"`
+	OS        string              `json:"os"`
+	Supported bool                `json:"supported"`
+	Kernel    string              `json:"kernel,omitempty"`
+	Arch      string              `json:"arch,omitempty"`
+	Labels    map[string]string   `json:"labels,omitempty"`
+	Scanned   string              `json:"scanned"`
+	Target    string              `json:"target"`
+	Root      bool                `json:"root"`
+	Tool      string              `json:"tool"`
+	Controls  []reportHostControl `json:"controls"`
+	Checks    []reportHostCheck   `json:"checks"`
+	Waivers   []engine.WaiverNote `json:"waivers,omitempty"`
+	// Attestations are the configured attestations that did not apply.
+	Attestations []engine.AttestationNote `json:"attestations,omitempty"`
+	Collectors   []reportCollector        `json:"collectors,omitempty"`
 }
 
 // reportHostControl is a host's result for one control: p and c index the
@@ -234,6 +236,8 @@ type reportHostCheck struct {
 	Omitted  int              `json:"m,omitempty"`
 	Coverage *engine.Coverage `json:"v,omitempty"`
 	Waiver   *engine.WaiverOf `json:"w,omitempty"`
+	// Attestation is the human verdict behind an attested result.
+	Attestation *engine.AttestationOf `json:"a,omitempty"`
 }
 
 // reportCollector is a collector that failed or saw only part of the host.
@@ -450,7 +454,7 @@ func (b *reportBuilder) addHost(in ReportInput, ambiguous bool) {
 		Name: r.Host.Hostname, File: in.Name, OS: osName(r.Host.OS), Supported: r.Host.OS.Supported,
 		Kernel: r.Host.Kernel, Arch: r.Host.Arch, Labels: r.Host.Labels, Scanned: r.Scan.StartedAt,
 		Root: r.Scan.Privileges.EUID == 0, Tool: r.Scan.Tool.Version,
-		Controls: []reportHostControl{}, Checks: []reportHostCheck{}, Waivers: r.Waivers,
+		Controls: []reportHostControl{}, Checks: []reportHostCheck{}, Waivers: r.Waivers, Attestations: r.Attestations,
 	}
 	if ambiguous {
 		h.Name += " (" + in.Name + ")"
@@ -464,7 +468,7 @@ func (b *reportBuilder) addHost(in ReportInput, ambiguous bool) {
 		checkIndex[c.Ref] = len(h.Checks)
 		hc := reportHostCheck{
 			Check: b.check(c), Status: c.Status, Original: c.OriginalStatus, Reason: b.str(c.Reason),
-			Omitted: c.EvidenceOmitted, Coverage: c.Coverage, Waiver: c.Waiver,
+			Omitted: c.EvidenceOmitted, Coverage: c.Coverage, Waiver: c.Waiver, Attestation: c.Attestation,
 		}
 		for _, e := range c.Evidence {
 			hc.Evidence = append(hc.Evidence, [2]int{b.str(e.Text), b.str(e.Source)})
