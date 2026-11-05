@@ -7,7 +7,7 @@ check applicable to it passes; checks that cannot decide report `MANUAL` or `ERR
 standard; titles and descriptions are hostlint's own. Parameters can be made stricter in
 [hostlint.yaml](configuration.md).
 
-## kisa-2026 (revision 5)
+## kisa-2026 (revision 6)
 
 KISA CII technical vulnerability assessment guide, 2026 edition — Unix servers
 
@@ -59,8 +59,8 @@ KISA CII technical vulnerability assessment guide, 2026 edition — Unix servers
 | U-44 | high | tftp and talk are off (tftp·talk 서비스 미사용) | [`services.no-tftp-talk`](#servicesno-tftp-talk) |
 | U-45 | high | The mail server is up to date (메일 서버 버전 관리) | [`services.review-mail-server`](#servicesreview-mail-server) |
 | U-46 | high | Only the mail system can run the mail queue (일반 사용자의 메일 서비스 실행 제한) | [`services.review-mail-server`](#servicesreview-mail-server) |
-| U-47 | high | The mail server is not an open relay (메일 릴레이 제한) | [`services.review-mail-server`](#servicesreview-mail-server) |
-| U-48 | medium | SMTP does not reveal accounts (SMTP 계정 확인 명령 제한) | [`services.review-mail-server`](#servicesreview-mail-server) |
+| U-47 | high | The mail server is not an open relay (메일 릴레이 제한) | [`services.postfix-no-open-relay`](#servicespostfix-no-open-relay), [`services.review-mail-relay-other`](#servicesreview-mail-relay-other) |
+| U-48 | medium | SMTP does not reveal accounts (SMTP 계정 확인 명령 제한) | [`services.postfix-no-vrfy`](#servicespostfix-no-vrfy), [`services.review-mail-relay-other`](#servicesreview-mail-relay-other) |
 | U-49 | high | The DNS server is up to date (DNS 서버 버전 관리) | [`services.review-dns-server`](#servicesreview-dns-server) |
 | U-50 | high | DNS zone transfers are restricted (DNS 영역 전송 제한) | [`services.review-dns-server`](#servicesreview-dns-server) |
 | U-51 | medium | DNS dynamic updates are restricted (DNS 동적 업데이트 제한) | [`services.review-dns-server`](#servicesreview-dns-server) |
@@ -755,6 +755,26 @@ Lists the ways the tftp, talk and ntalk services are started: enabled units, uni
 
 **Fix.** Disable them.
 
+#### `services.postfix-no-open-relay`
+
+Postfix does not relay for everyone (Postfix가 모든 곳의 메일을 중계하지 않음) — severity high, lists what violates it.
+
+Reads /etc/postfix/main.cf for the two ways to make Postfix an open relay: mynetworks with an entry that matches every address (a prefix length of 0), and a relay list (smtpd_relay_restrictions) that reaches a bare permit, or its end (which permits), without a reject_unauth_destination, defer_unauth_destination or bare reject or defer first, unless the recipient list refuses. The defaults of Postfix 2.10 and later are safe, so only what main.cf sets can fail this check. Not followed: lookup tables (hash: and cidr: entries), policy services and mynetworks_style. A master.cf option that overrides one of these parameters makes the result ERROR, since it cannot be judged from main.cf. Applies when Postfix is started and has a main.cf; another mail server is services.review-mail-relay-other.
+
+**Why.** An open relay sends spam for anyone and gets the server blocked.
+
+**Fix.** Set `mynetworks` to your own networks and end the relay restrictions with `defer_unauth_destination` (or `reject_unauth_destination`), with no bare `permit` before it, and do not let a list end without it.
+
+#### `services.postfix-no-vrfy`
+
+Postfix does not answer VRFY (Postfix가 VRFY 명령에 응답하지 않음) — severity medium, compares one setting.
+
+Checks disable_vrfy_command in /etc/postfix/main.cf. Postfix answers VRFY, which tells whether an address exists, unless it is set to yes (or on, true, 1). A master.cf option that overrides it makes the result ERROR. Applies when Postfix is started and has a main.cf; another mail server is services.review-mail-relay-other.
+
+**Why.** VRFY lets anyone test which accounts exist on the server.
+
+**Fix.** Set `disable_vrfy_command = yes` in /etc/postfix/main.cf and reload Postfix.
+
 #### `services.review-anonymous-sharing`
 
 Review anonymous access to file-sharing services (파일 공유 서비스 익명 접근 검토) — severity high, a review (`MANUAL`).
@@ -784,6 +804,16 @@ Applies when an FTP server is started; then shows how, for a review of its confi
 **Why.** Plain FTP sends passwords in clear text, and a version banner tells attackers which exploits to try.
 
 **Fix.** Check that the FTP server requires TLS (or is replaced by SFTP), hides its version in the banner, accepts connections only from the addresses that need it, and refuses root (ftpusers, user_list).
+
+#### `services.review-mail-relay-other`
+
+Review relaying and VRFY of the mail server (메일 서버의 중계·VRFY 설정 검토) — severity high, a review (`MANUAL`).
+
+Applies when a mail server other than Postfix is started, or Postfix is started and has no /etc/postfix/main.cf (Postfix with a main.cf is checked by services.postfix-no-open-relay and services.postfix-no-vrfy); then shows how it was started, for a review of its configuration. Not applicable otherwise.
+
+**Why.** An open mail server is used to send spam and to probe for accounts.
+
+**Fix.** Check that the mail server relays only for your networks and authenticated users and rejects EXPN and VRFY (Sendmail: PrivacyOptions noexpn, novrfy).
 
 #### `services.review-mail-server`
 
