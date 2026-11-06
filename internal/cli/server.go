@@ -15,6 +15,7 @@ import (
 
 	"github.com/with-developer/hostlint/internal/engine"
 	"github.com/with-developer/hostlint/internal/server"
+	"github.com/with-developer/hostlint/internal/signing"
 	"github.com/with-developer/hostlint/profiles"
 	"github.com/with-developer/hostlint/rules"
 )
@@ -92,7 +93,7 @@ HTTP is only allowed on a loopback address, or behind a TLS proxy with --behind-
 func newServerTokenCommand(dbPath *string) *cobra.Command {
 	cmd := &cobra.Command{Use: "token", Short: "Create, list and revoke tokens"}
 
-	var name, host, scope string
+	var name, host, scope, key string
 	var expires time.Duration
 	var anyHost bool
 	create := &cobra.Command{
@@ -114,7 +115,14 @@ host by --host: it can only send results of that host, and its host ID is pinned
 				return err
 			}
 			defer store.Close()
-			tok, id, err := store.CreateCredential(cmd.Context(), scope, name, host, expires)
+			var opts []server.CredentialOption
+			if key != "" {
+				if scope != server.ScopeIngest || signing.Fingerprint(key) == "" {
+					return errors.New("--key is the public key (base64) of an ingest token's host, as \"hostlint key generate\" prints it")
+				}
+				opts = append(opts, server.WithKey(key))
+			}
+			tok, id, err := store.CreateCredential(cmd.Context(), scope, name, host, expires, opts...)
 			if err != nil {
 				return err
 			}
@@ -129,6 +137,7 @@ host by --host: it can only send results of that host, and its host ID is pinned
 	fl.BoolVar(&anyHost, "any-host", false, "a token for every host")
 	fl.StringVar(&scope, "scope", server.ScopeIngest, "ingest (send results) or api (read; later)")
 	fl.DurationVar(&expires, "expires-in", 0, "make the token expire after this long, such as 2160h (default: never)")
+	fl.StringVar(&key, "key", "", "bind the token to this public key (base64): it only accepts results signed with it")
 	_ = create.MarkFlagRequired("name")
 
 	list := &cobra.Command{
@@ -211,9 +220,41 @@ it elsewhere, and a later run shows whether history was changed or cut off.`,
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "audit chain OK: %d rows, last hash %s\n", rows, last)
+			rep, err := store.VerifySignatures(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if !rep.OK() {
+				var problems []string
+				if len(rep.Mismatched) > 0 {
+					problems = append(problems, fmt.Sprintf("%d stored scans differ from what was recorded when they were received (document, signature or key)%s: the database was changed afterwards", len(rep.Mismatched), idList(rep.Mismatched)))
+				}
+				if len(rep.Derived) > 0 {
+					problems = append(problems, fmt.Sprintf("%d scans show other controls or another host than their stored document says%s", len(rep.Derived), idList(rep.Derived)))
+				}
+				if len(rep.Unrecorded) > 0 {
+					problems = append(problems, fmt.Sprintf("%d scans have no ingest record in the audit chain%s", len(rep.Unrecorded), idList(rep.Unrecorded)))
+				}
+				return errors.New(strings.Join(problems, "; "))
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "signatures OK: %d signed scans verify, %d are unsigned\n", rep.Signed, rep.Unsigned)
 			return nil
 		},
 	}
+}
+
+// idList shows up to twenty scan IDs.
+func idList(ids []int64) string {
+	shown := ids[:min(len(ids), 20)]
+	parts := make([]string, len(shown))
+	for i, id := range shown {
+		parts[i] = strconv.FormatInt(id, 10)
+	}
+	more := ""
+	if len(ids) > len(shown) {
+		more = ", …"
+	}
+	return " (scan IDs " + strings.Join(parts, ", ") + more + ")"
 }
 
 func orDash(s string) string {
@@ -375,11 +416,45 @@ func newServerHostCommand(dbPath *string) *cobra.Command {
 				return err
 			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tNAME\tHOST ID\tLAST SCAN")
+			fmt.Fprintln(tw, "ID\tNAME\tHOST ID\tLAST SCAN\tKEY")
 			for _, h := range hosts {
-				fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", h.ID, oneLineCLI(h.Name), orDash(oneLineCLI(h.HostID)), orDash(h.LastScanAt))
+				fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", h.ID, oneLineCLI(h.Name), orDash(oneLineCLI(h.HostID)), orDash(h.LastScanAt), orDash(h.KeyFingerprint))
 			}
 			return tw.Flush()
+		},
+	}
+	var newKey string
+	reset := &cobra.Command{
+		Use:   "reset-key ID",
+		Short: "Replace the signing key registered for a host",
+		Long: `A host that signs its results keeps signing with the same key. If its key was replaced on purpose
+(a re-installed machine), give the new public key with --key (the one "hostlint key generate" printed):
+it replaces the registered one at once. Without --key the registered key is forgotten and the next signed
+result registers a key, which leaves a window in which unsigned results are accepted.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil || id < 1 {
+				return fmt.Errorf("%q is not a host ID (see: hostlint server host list)", args[0])
+			}
+			store, err := server.OpenStore(*dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ok, err := store.ResetHostKey(cmd.Context(), id, newKey)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("host %d has no registered key", id)
+			}
+			if newKey == "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "the key of host %d was forgotten: until its next signed result registers a key, unsigned results are accepted (prefer --key)\n", id)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "the key of host %d was replaced\n", id)
+			}
+			return nil
 		},
 	}
 	var yes bool
@@ -415,6 +490,7 @@ be undone: make a backup first, and pass --yes to confirm.`,
 		},
 	}
 	del.Flags().BoolVar(&yes, "yes", false, "confirm the deletion")
-	cmd.AddCommand(list, del)
+	reset.Flags().StringVar(&newKey, "key", "", "the host's new public key (base64)")
+	cmd.AddCommand(list, del, reset)
 	return cmd
 }

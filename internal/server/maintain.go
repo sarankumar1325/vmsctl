@@ -1,14 +1,24 @@
 package server
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/with-developer/hostlint/internal/output"
+	"github.com/with-developer/hostlint/internal/signing"
 )
 
 // pruneBatch is how many scans one delete removes, so the single writer is never held for long.
@@ -118,7 +128,7 @@ func (s *Store) DeleteHost(ctx context.Context, id int64) (bool, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM hosts WHERE id = ?`, id); err != nil {
 		return false, err
 	}
-	if err := appendAudit(ctx, tx, s.stamp(), 0, "cli", "host-deleted", fmt.Sprintf("host %d %s with %d scans", id, name, scans), ""); err != nil {
+	if err := appendAudit(ctx, tx, s.stamp(), 0, "cli", "host-deleted", fmt.Sprintf("host %d %s with %d scans", id, name, scans)); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
@@ -127,4 +137,170 @@ func (s *Store) DeleteHost(ctx context.Context, id int64) (bool, error) {
 // Hosts of the database as `hostlint server host list` shows them.
 func (s *Store) HostList(ctx context.Context) ([]HostSummary, error) {
 	return s.allHosts(ctx, "", 0, 0)
+}
+
+// SignatureReport is what VerifySignatures found.
+type SignatureReport struct {
+	Signed, Unsigned int
+	// Mismatched are the scans whose stored document, signature or key does not match what the audit chain
+	// recorded when they were received: a changed document, a removed or replaced signature.
+	Mismatched []int64
+	// Derived are the scans whose host or control statuses, as the dashboard shows them, differ from the stored
+	// document (the individual check rows are not compared).
+	Derived []int64
+	// Unrecorded are the scans that no ingest audit row accounts for (not received through the server).
+	Unrecorded []int64
+}
+
+// OK reports whether every check passed.
+func (r SignatureReport) OK() bool {
+	return len(r.Mismatched)+len(r.Derived)+len(r.Unrecorded) == 0
+}
+
+// VerifySignatures checks every stored scan against what the hash-chained audit table recorded at its
+// ingest (the digest of the document and the key it was signed with), against its signature, and
+// against the rows derived from it. Whoever changes a stored document, strips or replaces its signature,
+// moves a scan to another host or edits what the dashboard shows has to rewrite the audit chain too,
+// which the hash kept elsewhere ("hostlint server verify" prints it) exposes. A database error is an
+// error, not a finding; a document that cannot be read back (corrupt) is a mismatch.
+func (s *Store) VerifySignatures(ctx context.Context) (SignatureReport, error) {
+	var rep SignatureReport
+	// A document can be received more than once (after a host was deleted, say): every ingest of a
+	// digest is kept, and a stored scan has to match one of them.
+	recorded := map[string][]string{} // digest of a document → the key fingerprints its ingests recorded
+	ar, err := s.db.QueryContext(ctx, `SELECT digest, key FROM audit WHERE action = 'ingest'`)
+	if err != nil {
+		return rep, err
+	}
+	for ar.Next() {
+		var digest, key string
+		if err := ar.Scan(&digest, &key); err != nil {
+			_ = ar.Close()
+			return rep, err
+		}
+		recorded[digest] = append(recorded[digest], key)
+	}
+	if err := ar.Err(); err != nil {
+		return rep, err
+	}
+	_ = ar.Close()
+
+	rs, err := s.db.QueryContext(ctx, `SELECT s.id, s.host_row, s.digest, s.pubkey, s.signature, h.name, h.host_id FROM scans s JOIN hosts h ON h.id = s.host_row ORDER BY s.id`)
+	if err != nil {
+		return rep, err
+	}
+	type row struct {
+		id, host                    int64
+		digest, key, sig, name, hid string
+	}
+	var rows []row
+	for rs.Next() {
+		var r row
+		if err := rs.Scan(&r.id, &r.host, &r.digest, &r.key, &r.sig, &r.name, &r.hid); err != nil {
+			_ = rs.Close()
+			return rep, err
+		}
+		rows = append(rows, r)
+	}
+	if err := rs.Err(); err != nil {
+		return rep, err
+	}
+	_ = rs.Close()
+	for _, r := range rows {
+		if r.sig == "" {
+			rep.Unsigned++
+		} else {
+			rep.Signed++
+		}
+		keys, ok := recorded[r.digest]
+		if !ok {
+			rep.Unrecorded = append(rep.Unrecorded, r.id)
+			continue
+		}
+		doc, err := s.ScanDoc(ctx, r.id)
+		var corrupt flate.CorruptInputError
+		switch {
+		case errors.Is(err, gzip.ErrHeader), errors.Is(err, gzip.ErrChecksum), errors.Is(err, io.ErrUnexpectedEOF), errors.As(err, &corrupt):
+			rep.Mismatched = append(rep.Mismatched, r.id)
+			continue
+		case err != nil:
+			return rep, fmt.Errorf("scan %d: %w", r.id, err)
+		}
+		sum := sha256.Sum256(doc)
+		switch {
+		case "sha256:"+hex.EncodeToString(sum[:]) != r.digest,
+			!slices.Contains(keys, signing.Fingerprint(r.key)), // "" for an unsigned scan, as the ingest recorded it
+			r.sig != "" && signing.Verify(r.key, r.sig, doc) != nil:
+			rep.Mismatched = append(rep.Mismatched, r.id)
+			continue
+		}
+		if !s.derivedMatches(ctx, r.id, r.name, r.hid, doc) {
+			rep.Derived = append(rep.Derived, r.id)
+		}
+	}
+	return rep, nil
+}
+
+// derivedMatches reports whether the controls stored for a scan, and the host it is filed under, are
+// what its document says.
+func (s *Store) derivedMatches(ctx context.Context, scanRow int64, name, hostID string, doc []byte) bool {
+	res, err := output.ReadResult(bytes.NewReader(doc))
+	if err != nil || res.Host.Hostname != name || res.Host.HostID != hostID {
+		return false
+	}
+	rs, err := s.db.QueryContext(ctx, `SELECT profile, control_id, status FROM scan_controls WHERE scan_row = ?`, scanRow)
+	if err != nil {
+		return false
+	}
+	defer rs.Close()
+	got := map[string]string{}
+	for rs.Next() {
+		var p, id, st string
+		if err := rs.Scan(&p, &id, &st); err != nil {
+			return false
+		}
+		got[p+"\x00"+id] = st
+	}
+	if rs.Err() != nil || len(got) != len(res.Controls) {
+		return false
+	}
+	for _, c := range res.Controls {
+		if got[c.Profile+"\x00"+c.ID] != string(c.Status) {
+			return false
+		}
+	}
+	return true
+}
+
+// ResetHostKey replaces the key registered for a host. newKey "" forgets it, so that the next signed
+// result registers one (and until then unsigned results are accepted: prefer giving the new key). It
+// is audited and reports whether the host had a key.
+func (s *Store) ResetHostKey(ctx context.Context, id int64, newKey string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var name, key string
+	err = tx.QueryRowContext(ctx, `SELECT name, pubkey FROM hosts WHERE id = ?`, id).Scan(&name, &key)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && key == "") {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if newKey != "" && signing.Fingerprint(newKey) == "" {
+		return false, errors.New("the new key is not an Ed25519 public key in base64")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE hosts SET pubkey = ? WHERE id = ?`, newKey, id); err != nil {
+		return false, err
+	}
+	detail := fmt.Sprintf("host %d %s, key %s forgotten", id, name, signing.Fingerprint(key))
+	if newKey != "" {
+		detail = fmt.Sprintf("host %d %s, key %s replaced by %s", id, name, signing.Fingerprint(key), signing.Fingerprint(newKey))
+	}
+	if err := appendAudit(ctx, tx, s.stamp(), 0, "cli", "host-key-reset", detail); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }

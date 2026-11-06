@@ -158,11 +158,40 @@ binary: the schema migrates when the server starts.
   `hostlint server verify` recomputes the chain and prints the last hash: keep it elsewhere to
   notice later changes.
 
+## Signed results
+
+A host can sign what it sends, so that a result is evidence of what that host's key said even if the
+server that stores it is compromised later:
+
+```sh
+sudo hostlint key generate /etc/hostlint/sign.key      # once per host; prints the fingerprint
+sudo HOSTLINT_TOKEN=hlt_ing_... hostlint scan --push https://hostlint.example.org:8443 \
+  --sign-key /etc/hostlint/sign.key
+```
+
+The server registers the key at the host's first signed result (trust on first use). To rule out that
+a stolen token registers someone else's key first, bind the token to the host's public key when you
+create it: `hostlint server token create --name web-01 --host web-01 --key <public key>`; it then
+accepts nothing but results signed with that key. From then on the server refuses that host's
+results that are unsigned or signed with another key (a stolen token alone is no longer enough),
+and the dashboard shows the host as signed with the key's fingerprint. `hostlint server verify` also
+checks every stored scan against what the hash-chained audit log recorded when it was received (the
+digest of the document and the key it was signed with) and against its signature, so a result changed in
+the database afterwards, a signature that was removed or replaced, controls shown by the dashboard that
+differ from the stored document, a scan moved to another host, and a scan with no ingest record are all
+found. A host that signs does not go back in time: a signed result that does not start after the host's
+latest scan is refused (a captured result cannot be replayed once the original was pruned), while a retry
+of a stored scan is still answered as before. A host whose clock ran ahead by a few minutes has to wait until real time catches up (the server accepts start times at most five minutes ahead), and a scan that was delayed behind a newer one is not accepted any more. If a key was replaced on purpose (a re-installed machine), `hostlint server host reset-key ID --key
+<new public key>` replaces the registered one at once (without `--key` it is forgotten, and until the next
+signed result registers a key unsigned results are accepted). A token bound to the old key (`--key`) keeps asking for it: issue a new token for the host. The key file is refused if other users can read it.
+
 ## What it does not protect
 
-The server is a store, not an authority. Whoever controls its database can change what it shows,
-and a stolen token can submit results for the host it is bound to. Signed results are planned. Until
-then, the stored records are only as trustworthy as the server.
+The server is a store, not an authority. Whoever controls its database can change what it shows, and
+can also replace both a stored result and its signature and key together: keep a copy of the key
+fingerprints (`hostlint server host list`) and of the audit hash (`hostlint server verify`) somewhere
+else to notice that. A stolen token can submit results for the host it is bound to unless that host
+signs; a host whose own key is stolen can sign anything.
 
 ## Hosts
 
