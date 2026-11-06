@@ -132,6 +132,38 @@ func TestBindIncludesAndLocalZones(t *testing.T) {
 	}
 }
 
+// A quoted string may span lines: the trust anchors of EL7's named.root.key do.
+func TestBindMultiLineString(t *testing.T) {
+	cfg := readBind(t, map[string]string{
+		"/etc/named.conf":     "include \"/etc/named.root.key\";\nzone \"a\" { type master; allow-transfer { none; }; };\n",
+		"/etc/named.root.key": "managed-keys {\n  . initial-key 257 3 8 \"AwEAAagAIKlVZrpC\n     FVQUTf6v58fLjwBd\n     QxA+Uk1ihz0=\";\n};\n",
+	})
+	if len(cfg.Skipped) != 0 || len(cfg.Zones) != 1 || cfg.Zones[0].Transfer != "none" || !strings.HasSuffix(cfg.Zones[0].Where, "named.conf:2") {
+		t.Errorf("zones %+v, skipped %v", cfg.Zones, cfg.Skipped)
+	}
+}
+
+// Only a key or a secret may continue over lines; a stray quote elsewhere is an error at its own line,
+// and an escaped newline still counts as a line.
+func TestBindStringsAcrossLines(t *testing.T) {
+	stray := readBind(t, map[string]string{"/etc/named.conf": "zone \"a\" { type master; allow-transfer { \"none; }; };\nzone \"b\" { type master; allow-transfer { none; }; };\n"})
+	if len(stray.Skipped) != 1 || !strings.Contains(stray.Skipped[0], "named.conf:1: unterminated string") {
+		t.Errorf("skipped %v", stray.Skipped)
+	}
+	eof := readBind(t, map[string]string{"/etc/named.conf": "key k {\n secret \"abc\n def\n"})
+	if len(eof.Skipped) != 1 || !strings.Contains(eof.Skipped[0], "named.conf:2: unterminated string") {
+		t.Errorf("skipped %v", eof.Skipped)
+	}
+	escaped := readBind(t, map[string]string{"/etc/named.conf": "key k { secret \"abc\\\ndef\"; };\nzone \"a\" { type master; };\n"})
+	if len(escaped.Skipped) != 0 || len(escaped.Zones) != 1 || !strings.HasSuffix(escaped.Zones[0].Where, "named.conf:3") {
+		t.Errorf("zones %+v, skipped %v", escaped.Zones, escaped.Skipped)
+	}
+	long := readBind(t, map[string]string{"/etc/named.conf": "key k { secret \"" + strings.Repeat("a", 5000) + "\"; };\n"})
+	if len(long.Skipped) != 1 {
+		t.Errorf("skipped %v", long.Skipped)
+	}
+}
+
 func TestBindMoreForms(t *testing.T) {
 	tests := []struct {
 		name, conf, transfer, update string

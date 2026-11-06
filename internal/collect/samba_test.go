@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -27,6 +28,19 @@ func TestSambaPackagedConfiguration(t *testing.T) {
 	s, complete := collectSamba(t, fixtureFS(t, "ubuntu-24.04"))
 	if !s.Present || !complete || len(s.Shares) != 1 || s.Shares[0].Name != "print$" || s.Shares[0].Guest {
 		t.Errorf("%+v complete %v", s, complete)
+	}
+}
+
+// Rocky Linux 9's smb.conf includes usershares.conf, which does not exist until a user share is made.
+func TestSambaRockyConfiguration(t *testing.T) {
+	s, complete := collectSamba(t, fixtureFS(t, "rocky-9"))
+	if !s.Present || !complete {
+		t.Errorf("%+v complete %v", s, complete)
+	}
+	for _, sh := range s.Shares {
+		if sh.Guest {
+			t.Errorf("share %+v", sh)
+		}
 	}
 }
 
@@ -72,12 +86,50 @@ func TestSambaWhere(t *testing.T) {
 	}
 }
 
+// An include is read in place; a missing one is ignored (RHEL's smb.conf names usershares.conf).
+func TestSambaIncludes(t *testing.T) {
+	m := smbConf("[global]\n  include = /etc/samba/usershares.conf\n  include = /etc/samba/gone.conf\n[a]\n  include = extra.conf\n").
+		AddFile("/etc/samba/usershares.conf", "[pub]\n  guest ok = yes\n", 0o644, 0, 0).
+		AddFile("/etc/samba/extra.conf", "guest ok = yes\n  include = /etc/samba/smb.conf\n", 0o644, 0, 0)
+	s, complete := collectSamba(t, m)
+	if !complete || len(s.Shares) != 2 || s.Shares[0].Name != "pub" || !s.Shares[0].Guest || s.Shares[1].Name != "a" || !s.Shares[1].Guest {
+		t.Errorf("%+v complete %v", s.Shares, complete)
+	}
+	if !strings.HasSuffix(s.Shares[1].Where, "extra.conf:1") {
+		t.Errorf("where %s", s.Shares[1].Where)
+	}
+}
+
+func TestSambaIncludeEdges(t *testing.T) {
+	incomplete := func(name string, m *hostfs.MemFS) {
+		t.Helper()
+		if _, complete := collectSamba(t, m); complete {
+			t.Errorf("%s: the facts must be incomplete", name)
+		}
+	}
+	incomplete("registry", smbConf("[global]\n  include = registry\n"))
+	incomplete("a relative include that is not there", smbConf("[global]\n  include = conf.d/x.conf\n"))
+	incomplete("a macro in a nested file", smbConf("include = /etc/samba/a.conf\n").AddFile("/etc/samba/a.conf", "include = /etc/samba/%U.conf\n", 0o644, 0, 0))
+	incomplete("an include that cannot be read", smbConf("include = /etc/samba/a.conf\n").AddFile("/etc/samba/a.conf", "x", 0o644, 0, 0).SetError("/etc/samba/a.conf", fsErrPermission))
+	deep := smbConf("include = /etc/samba/i1.conf\n")
+	for i := 1; i <= 10; i++ {
+		deep.AddFile(fmt.Sprintf("/etc/samba/i%d.conf", i), fmt.Sprintf("include = /etc/samba/i%d.conf\n", i+1), 0o644, 0, 0)
+	}
+	incomplete("a chain deeper than the limit", deep)
+	// Names are cleaned: a non-canonical path is the same file, and a self include is a cycle.
+	m := smbConf("include = /etc/samba//./extra.conf\ninclude = /etc/samba/../samba/smb.conf\n").
+		AddFile("/etc/samba/extra.conf", "[pub]\n  guest ok = yes\n", 0o644, 0, 0)
+	if s, complete := collectSamba(t, m); !complete || len(s.Shares) != 1 || !s.Shares[0].Guest {
+		t.Errorf("%+v complete %v", s.Shares, complete)
+	}
+}
+
 func TestSambaIncompleteAndAbsent(t *testing.T) {
 	for name, conf := range map[string]string{
-		"an include":         "include = /etc/samba/extra.conf\n[a]\n",
-		"a config file":      "[global]\n  config file = /etc/samba/%m.conf\n",
-		"a value not a bool": "[a]\n  guest ok = maybe\n",
-		"an open bracket":    "[a\n",
+		"an include with a macro": "include = /etc/samba/%m.conf\n[a]\n",
+		"a config file":           "[global]\n  config file = /etc/samba/%m.conf\n",
+		"a value not a bool":      "[a]\n  guest ok = maybe\n",
+		"an open bracket":         "[a\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, complete := collectSamba(t, smbConf(conf)); complete {
