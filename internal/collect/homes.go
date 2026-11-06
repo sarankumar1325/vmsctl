@@ -61,27 +61,43 @@ func (homesCollector) Version() int          { return 1 }
 func (homesCollector) Access() engine.Access { return engine.AccessFilesystem }
 func (homesCollector) Type() reflect.Type    { return reflect.TypeFor[Homes]() }
 
-func (homesCollector) Collect(_ context.Context, h *hostfs.Host) (engine.Facts, error) {
+func (homesCollector) Collect(ctx context.Context, h *hostfs.Host) (engine.Facts, error) {
 	var skipped []string
 	homes := &Homes{Accounts: []Home{}}
 	seen := map[string]Home{} // accounts often share a home (/, /var/empty)
+	var stopped error         // the context ended: stop looking at homes
 	err := eachRecord(h.FS, "/etc/passwd", 7, func(f []string, _ string) error {
 		uid, err := strconv.ParseInt(f[2], 10, 64)
 		if err != nil {
 			return errMalformed
 		}
+		if stopped != nil || ctx.Err() != nil {
+			stopped = ctx.Err()
+			return nil
+		}
 		home := Home{User: f[0], UID: uid, LoginShell: !noLoginShells[f[6]], Path: f[5], StartupFiles: []HomeFile{}}
 		if prev, ok := seen[home.Path]; ok {
 			home.Exists, home.OwnerUID, home.Mode, home.StartupFiles = prev.Exists, prev.OwnerUID, prev.Mode, prev.StartupFiles
 		} else {
-			if err := observeHome(h.FS, &home); err != nil && !slices.Contains(skipped, err.Error()) {
-				skipped = append(skipped, err.Error())
+			if err := observeHome(h.FS, &home); err != nil {
+				errs := []error{err}
+				if joined, ok := err.(interface{ Unwrap() []error }); ok {
+					errs = joined.Unwrap()
+				}
+				for _, e := range errs {
+					if !slices.Contains(skipped, e.Error()) {
+						skipped = append(skipped, e.Error())
+					}
+				}
 			}
 			seen[home.Path] = home
 		}
 		homes.Accounts = append(homes.Accounts, home)
 		return nil
 	}, &skipped)
+	if err == nil {
+		err = stopped
+	}
 	if err != nil {
 		return engine.Facts{}, err
 	}
@@ -109,6 +125,7 @@ func observeHome(fsys hostfs.FS, home *Home) error {
 	if !fi.IsDir() {
 		return nil
 	}
+	var problems []error // a file that cannot be looked at does not hide the others
 	for _, name := range startupFiles {
 		file := path.Join(p, name)
 		if pointsToNull(fsys, file) {
@@ -122,11 +139,12 @@ func observeHome(fsys hostfs.FS, home *Home) error {
 			}
 			continue
 		case err != nil:
-			return err
+			problems = append(problems, err)
+			continue
 		}
 		home.StartupFiles = append(home.StartupFiles, HomeFile{Path: file, UID: f.UID, Mode: fmt.Sprintf("%04o", f.Perm())})
 	}
-	return nil
+	return errors.Join(problems...)
 }
 
 // pointsToNull reports whether file is a symbolic link to /dev/null, the way

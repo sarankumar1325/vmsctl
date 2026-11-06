@@ -599,7 +599,7 @@ Checks that /etc/sudoers and the files in /etc/sudoers.d are owned by root with 
 
 No files or directories named only of dots and spaces (점과 공백만으로 된 이름의 파일·디렉터리 없음) — severity low, lists what violates it.
 
-Lists files and directories on local filesystems whose name is made only of dots and spaces (other than "." and ".."), such as "..." or ". ". Nothing legitimate needs such a name, and it hides a directory among the entries of a listing.
+Lists files and directories on local filesystems (and in /dev) whose name is made only of dots and spaces (other than "." and ".."), such as "..." or ". ". Nothing legitimate needs such a name, and it hides a directory among the entries of a listing.
 
 **Why.** A directory named "..." or ". " is easy to overlook next to "." and "..", which makes it a place to hide files.
 
@@ -619,7 +619,7 @@ Checks that /etc/syslog.conf, /etc/rsyslog.conf and /etc/rsyslog.d/*.conf are ow
 
 No files without an owner (소유자·그룹이 없는 파일 없음) — severity high, lists what violates it.
 
-Lists files and directories on local filesystems whose owner or group has no account in /etc/passwd or /etc/group.
+Lists files and directories on local filesystems whose owner or group has no account in /etc/passwd or /etc/group. Accounts that only a directory service (LDAP, SSSD, NIS) provides are not looked up, so files they own are listed too.
 
 **Why.** A file left behind by a deleted account belongs to whoever is next given its UID or GID.
 
