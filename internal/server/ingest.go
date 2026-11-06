@@ -69,6 +69,7 @@ func New(cfg Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/results", s.handleIngest)
+	s.routesRead(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -195,7 +196,7 @@ func (s *Server) reject(ctx context.Context, credID int64, remote, action, detai
 
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	s.cfg.Logger.Error("request failed", "error", err)
-	writeError(w, http.StatusInternalServerError, "the server could not store the result")
+	writeError(w, http.StatusInternalServerError, "the server could not complete the request")
 }
 
 // checkLimits bounds a result that passed ReadResult, which only checks that it is well formed.
