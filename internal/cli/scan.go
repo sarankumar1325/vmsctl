@@ -29,6 +29,13 @@ type findingsError struct {
 	threshold string
 }
 
+// regressionError means `hostlint diff --fail-on-regression` found controls that got worse.
+type regressionError struct{ controls int }
+
+func (e *regressionError) Error() string {
+	return fmt.Sprintf("%d control(s) regressed since the earlier scan", e.controls)
+}
+
 func (e *findingsError) Error() string {
 	return fmt.Sprintf("%d control(s) failed or could not be checked at severity %s or above", e.controls, e.threshold)
 }
