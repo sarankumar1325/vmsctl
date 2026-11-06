@@ -185,6 +185,7 @@ func (s *shellScanner) file(name string, cond bool, depth int) {
 	s.read[name] = true
 
 	depthBlocks := 0
+	var openers []opener // the blocks still open
 	lines := s.logicalLines(name, data)
 	for idx, l := range lines {
 		code := l.code
@@ -193,9 +194,14 @@ func (s *shellScanner) file(name string, cond bool, depth int) {
 		// A command may not run inside a block, on a line that opens one,
 		// after && or ||, or in a subshell.
 		lineCond := cond || depthBlocks > 0 || opens > 0 || hasControlOperator(code)
+		// The files a loop over /etc/profile.d sources run under the guards around the
+		// loop: the stock ones hold in an interactive login shell, any other (or the
+		// else branch of one) makes them conditional.
+		loopCond := cond || hasControlOperator(code) || !stockGuards(openers)
 		s.scanLine(code, src, lineCond)
-		s.follow(code, src, lineCond, depth, func() string { return loopBody(lines, idx) })
+		s.follow(code, src, lineCond, loopCond, depth, func() string { return loopBody(lines, idx) })
 		depthBlocks = max(depthBlocks+opens-closes, 0)
+		openers = updateOpeners(openers, code, opens)
 	}
 }
 
@@ -385,18 +391,18 @@ func (s *shellScanner) scanLine(code, src string, cond bool) {
 
 // follow scans the files a line sources: ". file" and "source file", and
 // the /etc/profile.d loop of /etc/profile.
-func (s *shellScanner) follow(code, src string, cond bool, depth int, body func() string) {
+func (s *shellScanner) follow(code, src string, cond, loopCond bool, depth int, body func() string) {
 	rest := code
 	switch m := runPartsLoopRe.FindStringSubmatch(code); {
 	case m != nil:
 		after := code[len(m[0]):]
 		hasRegex := strings.Contains(m[0], "--regex")
 		if loopSourcesItems(code, body) {
-			s.runParts(m[1]+m[2], hasRegex, m[2] != "", src, depth)
+			s.runParts(m[1]+m[2], hasRegex, m[2] != "", src, depth, loopCond || loopBodyGuarded(code, body))
 		}
 		rest = s.afterLoop(src, after)
 	case forRe.MatchString(code) && mentionsProfileD(code):
-		rest = s.profileLoop(code, src, depth, loopSourcesItems(code, body))
+		rest = s.profileLoop(code, src, depth, loopCond || loopBodyGuarded(code, body), loopSourcesItems(code, body))
 	case forAnywhereRe.MatchString(code) && mentionsProfileD(code):
 		// A loop behind a condition or another command.
 		s.unknownLoop(src)
@@ -413,6 +419,16 @@ func (s *shellScanner) follow(code, src string, cond bool, depth int, body func(
 		target = path.Clean(target)
 		s.file(target, cond && !slices.Contains(standardSources, target), depth+1)
 	}
+}
+
+// loopBodyGuarded reports whether the body of the for loop on code puts a
+// non-stock condition around what it sources.
+func loopBodyGuarded(code string, body func() string) bool {
+	if loopVarRe.FindStringSubmatch(code) == nil {
+		return false
+	}
+	b := body()
+	return b != "" && bodyGuarded(b)
 }
 
 func mentionsProfileD(code string) bool {
@@ -441,7 +457,7 @@ func (s *shellScanner) afterLoop(src, after string) string {
 // source every readable file they list. A loop whose list is not literal
 // paths and globs leaves the facts incomplete: what it sources is unknown,
 // not absent.
-func (s *shellScanner) profileLoop(code, src string, depth int, sources bool) string {
+func (s *shellScanner) profileLoop(code, src string, depth int, cond, sources bool) string {
 	list, rest, ok := loopList(code)
 	var files []string
 	listed := ok // the loop lists literal paths or globs
@@ -474,7 +490,7 @@ func (s *shellScanner) profileLoop(code, src string, depth int, sources bool) st
 		return rest // the loop never uses what it lists
 	}
 	for _, f := range files {
-		s.file(f, false, depth+1)
+		s.file(f, cond, depth+1)
 	}
 	return rest
 }
@@ -517,7 +533,7 @@ func loopRest(s string) string {
 // them, whose names match, in C-locale order. Root's `[ -r $i ]` always
 // holds, so each is sourced. hasRegex is true for an option given even when
 // its value is empty (that matches every name).
-func (s *shellScanner) runParts(expr string, hasRegex, doubleQuoted bool, src string, depth int) {
+func (s *shellScanner) runParts(expr string, hasRegex, doubleQuoted bool, src string, depth int, cond bool) {
 	re := runPartsNameRe
 	if hasRegex {
 		if why := notERE(expr, doubleQuoted); why != "" {
@@ -569,7 +585,7 @@ func (s *shellScanner) runParts(expr string, hasRegex, doubleQuoted bool, src st
 			mode = fi.Mode
 		}
 		if mode.IsRegular() {
-			s.file(p, false, depth+1)
+			s.file(p, cond, depth+1)
 		}
 	}
 }
@@ -705,11 +721,10 @@ var positiveTMOUT = regexp.MustCompile(`^0*[1-9][0-9]*$`)
 // select, a function's or a group's "{") and close (fi, esac, done, "}")
 // shell blocks on a line.
 func blockWords(code string) (opens, closes int) {
-	for _, w := range strings.FieldsFunc(code, func(r rune) bool { return strings.ContainsRune(" \t;&|()", r) }) {
-		switch w {
-		case "if", "case", "for", "while", "until", "select", "{":
+	for _, open := range blockSeq(code) {
+		if open {
 			opens++
-		case "fi", "esac", "done", "}":
+		} else {
 			closes++
 		}
 	}
@@ -717,6 +732,20 @@ func blockWords(code string) (opens, closes int) {
 		opens++ // "name()" with its brace on the next line
 	}
 	return opens, closes
+}
+
+// blockSeq lists, in order, whether each block word of a line opens (true) or closes (false) a block.
+func blockSeq(code string) []bool {
+	var seq []bool
+	for _, w := range strings.FieldsFunc(code, func(r rune) bool { return strings.ContainsRune(" \t;&|()", r) }) {
+		switch w {
+		case "if", "case", "for", "while", "until", "select", "{":
+			seq = append(seq, true)
+		case "fi", "esac", "done", "}":
+			seq = append(seq, false)
+		}
+	}
+	return seq
 }
 
 // hasControlOperator reports whether a line has && or || or a subshell
@@ -776,4 +805,67 @@ func readonlyPrefix(prefix string) bool {
 		return strings.Contains(flags, "r")
 	}
 	return false
+}
+
+// opener is an open block of a startup file: the line that opened it, and whether
+// the file went on to its else or elif branch (which a condition no longer guards).
+type opener struct {
+	text     string
+	branched bool
+}
+
+var branchRe = regexp.MustCompile(`(^|[;\s])(else|elif)(\s|;|$)`)
+
+// updateOpeners applies a line to the stack of open blocks: its block words in
+// order (a closing word ends the block opened last), and an else or elif, which
+// marks the innermost block as no longer guarded by its condition.
+func updateOpeners(stack []opener, code string, opens int) []opener {
+	text := strings.TrimSpace(code)
+	pushed := 0
+	for _, open := range blockSeq(code) {
+		if open {
+			stack = append(stack, opener{text: text})
+			pushed++
+		} else if len(stack) > 0 {
+			stack = stack[:len(stack)-1]
+		}
+	}
+	// A function header with its brace on the next line opens a block too.
+	for ; pushed < opens; pushed++ {
+		stack = append(stack, opener{text: text})
+	}
+	if branchRe.MatchString(code) && len(stack) > 0 {
+		stack[len(stack)-1].branched = true
+	}
+	return stack
+}
+
+// stockGuardRe are the conditions around the stock profile.d loops, which hold in
+// an interactive login shell: the directory exists, bash is interactive.
+var stockGuardRe = regexp.MustCompile(`^if \[ (-d /etc/profile\.d|-n "\$PS1"|"\$PS1") \]\s*;\s*then\s*$`)
+
+// stockGuards reports whether every block around a line was opened by a stock
+// guard and is still on its guarded branch.
+func stockGuards(openers []opener) bool {
+	for _, o := range openers {
+		if o.branched || !stockGuardRe.MatchString(o.text) {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	// The guards inside the stock loop bodies: the file is readable, bash is
+	// interactive (both branches source the file).
+	stockBodyGuardRe = regexp.MustCompile(`\bif\s+\[\s+(-r\s+"?\$\w+"?|"\$\{-#\*i\}"\s+!=\s+"\$-")\s+\]\s*;\s*then\b`)
+	bodyWordRe       = regexp.MustCompile(`\b(fi|else|done)\b`)
+	bodyControlRe    = regexp.MustCompile(`\b(if|elif|case|while|until|select)\b|&&|\|\|`)
+)
+
+// bodyGuarded reports whether a loop body puts a condition other than the stock
+// ones around what it sources.
+func bodyGuarded(body string) bool {
+	rest := bodyWordRe.ReplaceAllString(stockBodyGuardRe.ReplaceAllString(body, " "), " ")
+	return bodyControlRe.MatchString(rest)
 }
