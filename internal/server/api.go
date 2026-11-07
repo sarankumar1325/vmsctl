@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +65,7 @@ func (s *Server) routesRead(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/v1/session", s.readAPI(s.handleSession))
+	mux.HandleFunc("GET /api/v1/profiles", s.readAPI(s.handleProfiles))
 	mux.HandleFunc("GET /api/v1/overview", s.readAPI(s.handleOverview))
 	mux.HandleFunc("GET /api/v1/hosts", s.readAPI(s.handleHosts))
 	mux.HandleFunc("GET /api/v1/matrix", s.readAPI(s.handleMatrix))
@@ -87,6 +89,50 @@ func staleAfter(r *http.Request) (time.Duration, error) {
 	return time.Duration(n) * 24 * time.Hour, nil
 }
 
+var profileParamRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// selectedProfile reads ?profile=: the profile the numbers of a page are of. Without it, the profile that most
+// hosts scanned with (hosts that scanned with several profiles would be counted twice otherwise, ADR 0010).
+func (s *Server) selectedProfile(r *http.Request) (string, error) {
+	if v := r.URL.Query().Get("profile"); v != "" {
+		if v == "all" {
+			return "", nil // every profile added up: what the dashboard counted before there were several
+		}
+		if !profileParamRe.MatchString(v) {
+			return "", errors.New("profile is a profile ID")
+		}
+		return v, nil
+	}
+	uses, err := s.cfg.Store.Profiles(r.Context())
+	if err != nil || len(uses) == 0 {
+		return "", err
+	}
+	return uses[0].ID, nil
+}
+
+// handleProfiles lists the profiles of the latest scans with the number of hosts, and the one the pages show without
+// a choice.
+func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
+	uses, err := s.cfg.Store.Profiles(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	def := ""
+	if len(uses) > 0 {
+		def = uses[0].ID
+	}
+	titles := map[string]string{}
+	if s.cfg.Content != nil {
+		for _, u := range uses {
+			if p := s.cfg.Content.Profiles[u.ID]; p != nil {
+				titles[u.ID] = p.Title
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"profiles": uses, "default": def, "titles": titles})
+}
+
 func pathID(r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	return id, err == nil && id > 0
@@ -98,7 +144,12 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	o, err := s.cfg.Store.Overview(r.Context(), after)
+	profile, err := s.selectedProfile(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	o, err := s.cfg.Store.Overview(r.Context(), after, profile)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -119,7 +170,12 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	f := HostFilter{Query: q.Get("q"), Status: q.Get("status"), StaleAfter: after, Sort: q.Get("sort")}
+	profile, err := s.selectedProfile(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	f := HostFilter{Query: q.Get("q"), Status: q.Get("status"), StaleAfter: after, Sort: q.Get("sort"), Profile: profile}
 	if f.Sort != "" && f.Sort != "name" && f.Sort != "score" && f.Sort != "last" {
 		writeError(w, http.StatusBadRequest, `sort is "name", "score" or "last"`)
 		return
@@ -156,7 +212,7 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 func writeHostsCSV(w http.ResponseWriter, hosts []HostSummary) {
 	var b bytes.Buffer
 	cw := csv.NewWriter(&b)
-	_ = cw.Write([]string{"host", "host_id", "last_scan", "stale", "score", "FAIL", "ERROR", "MANUAL", "WAIVED", "PASS", "NOT_APPLICABLE"})
+	_ = cw.Write([]string{"host", "host_id", "last_scan", "stale", "score", "FAIL", "ERROR", "MANUAL", "WAIVED", "PASS", "NOT_APPLICABLE", "profile", "other_profile"})
 	for _, h := range hosts {
 		score := ""
 		if h.Score != nil {
@@ -166,6 +222,7 @@ func writeHostsCSV(w http.ResponseWriter, hosts []HostSummary) {
 		for _, st := range statusOrder {
 			row = append(row, strconv.Itoa(h.Counts[st]))
 		}
+		row = append(row, csvText(h.Profile), strconv.FormatBool(h.OtherProfile))
 		_ = cw.Write(row)
 	}
 	cw.Flush()
@@ -193,7 +250,12 @@ func (s *Server) handleHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	d, err := s.cfg.Store.Host(r.Context(), id, after)
+	profile, err := s.selectedProfile(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	d, err := s.cfg.Store.Host(r.Context(), id, after, profile)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "no such host")
@@ -346,7 +408,12 @@ func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	m, err := s.cfg.Store.Matrix(r.Context(), after)
+	profile, err := s.selectedProfile(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	m, err := s.cfg.Store.Matrix(r.Context(), after, profile)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -358,7 +425,12 @@ func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleControls(w http.ResponseWriter, r *http.Request) {
-	list, err := s.cfg.Store.Controls(r.Context())
+	profile, err := s.selectedProfile(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	list, err := s.cfg.Store.Controls(r.Context(), profile)
 	if err != nil {
 		s.fail(w, err)
 		return
