@@ -5,6 +5,7 @@ import (
 	"maps"
 	"path"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -13,11 +14,17 @@ import (
 // keeps its original status.
 type Waiver struct {
 	Check   string // a check ID; or
-	Control string // a control ID of the scanned profile
+	Control string // a control ID of a scanned profile
+	// Profile names the profile of a control waiver when several are scanned and the ID is in more than one.
+	Profile string
 	// Revision is the profile revision a control waiver was written for; it
 	// goes stale when the profile changes.
 	Revision int
-	Reason   string
+	// Digest is the digest of the profile a waiver of a control of a pack's profile was written for: a
+	// pack author can change a mapping without changing the revision, so the waiver is bound to the
+	// content (Content.ProfileDigest, shown by `hostlint pack show`).
+	Digest string
+	Reason string
 	// Expires is the last day the waiver applies (a date, UTC).
 	Expires time.Time
 	// Errors makes the waiver cover ERROR too: a deliberate decision that
@@ -115,17 +122,23 @@ func waiveChecks(waivers []Waiver, checks map[string]*CheckResult, hostname stri
 // waiveControl applies control waivers to one aggregated control. A control
 // waiver does not apply while any of the control's checks is ERROR, and
 // goes stale when the profile revision changes.
-func waiveControl(waivers []Waiver, profile *Profile, cr *ControlResult, checks map[string]*CheckResult, hostname string, today time.Time) []WaiverNote {
+func waiveControl(waivers []Waiver, profile *Profile, digest string, cr *ControlResult, checks map[string]*CheckResult, hostname string, today time.Time) []WaiverNote {
 	var notes []WaiverNote
 	for _, w := range waivers {
 		switch {
-		case w.Control != cr.ID || !w.appliesTo(hostname):
+		case w.Control != cr.ID || (w.Profile != "" && w.Profile != profile.ID) || !w.appliesTo(hostname):
 			continue
 		case w.expired(today):
 			notes = append(notes, w.note("expired"))
 			continue
 		case w.Revision != profile.Revision:
 			notes = append(notes, w.note(fmt.Sprintf("stale: written for revision %d of %s, which is now at %d", w.Revision, profile.ID, profile.Revision)))
+			continue
+		case strings.HasPrefix(profile.ID, PackPrefix) && w.Digest == "":
+			notes = append(notes, w.note("not applied: a waiver of a control of a pack's profile names the digest of the profile (digest: "+digest+")"))
+			continue
+		case w.Digest != "" && w.Digest != digest:
+			notes = append(notes, w.note("stale: written for another content of "+profile.ID+" than the one scanned (its digest is now "+digest+")"))
 			continue
 		}
 		erroring := slices.ContainsFunc(cr.Checks, func(ref string) bool { return checks[ref].Status == StatusError })

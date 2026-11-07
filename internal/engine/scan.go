@@ -66,7 +66,12 @@ func New(content *Content, collectors ...Collector) (*Engine, error) {
 
 // Options control one scan.
 type Options struct {
-	Profile          string
+	// Profile is the profile to scan with; Profiles names several, which are scanned together (the checks
+	// they share are evaluated once). Profile is added to Profiles when it is not in it.
+	Profile  string
+	Profiles []string
+	// Packs are the policy packs whose content was added to the engine's content; the result names them.
+	Packs            []PackInfo
 	Labels           map[string]string
 	Tool             ToolInfo
 	CollectorTimeout time.Duration
@@ -91,9 +96,25 @@ type instance struct {
 
 // Scan evaluates the profile's checks on the host.
 func (e *Engine) Scan(ctx context.Context, h *hostfs.Host, opts Options) (*Result, error) {
-	profile, ok := e.content.Profiles[opts.Profile]
-	if !ok {
-		return nil, fmt.Errorf("unknown profile %q (available: %s)", opts.Profile, strings.Join(sortedKeys(e.content.Profiles), ", "))
+	var profiles []*Profile
+	var ids []string
+	if opts.Profile != "" {
+		ids = append(ids, opts.Profile)
+	}
+	for _, id := range opts.Profiles {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range ids {
+		profile, ok := e.content.Profiles[id]
+		if !ok {
+			return nil, fmt.Errorf("unknown profile %q (available: %s)", id, strings.Join(sortedKeys(e.content.Profiles), ", "))
+		}
+		profiles = append(profiles, profile)
+	}
+	if len(profiles) == 0 {
+		return nil, errors.New("no profile to scan with")
 	}
 	now := opts.Now
 	if now == nil {
@@ -107,24 +128,27 @@ func (e *Engine) Scan(ctx context.Context, h *hostfs.Host, opts Options) (*Resul
 
 	// Plan: one instance per distinct (check, parameters).
 	instances := map[string]*instance{}
-	controlRefs := make([][]string, len(profile.Controls))
-	for i, ctl := range profile.Controls {
-		for _, id := range ctl.Checks {
-			cc := e.compiled[id]
-			params := effectiveParams(cc.check, ctl.Params[id])
-			customized := false
-			if over := opts.Params[id]; len(over) > 0 {
-				var err error
-				if params, err = overrideParams(cc.check, params, over); err != nil {
-					return nil, err
+	controlRefs := make([][][]string, len(profiles)) // profile → control → check refs
+	for pi, profile := range profiles {
+		controlRefs[pi] = make([][]string, len(profile.Controls))
+		for i, ctl := range profile.Controls {
+			for _, id := range ctl.Checks {
+				cc := e.compiled[id]
+				params := effectiveParams(cc.check, ctl.Params[id])
+				customized := false
+				if over := opts.Params[id]; len(over) > 0 {
+					var err error
+					if params, err = overrideParams(cc.check, params, over); err != nil {
+						return nil, err
+					}
+					customized = true
 				}
-				customized = true
+				ref := checkRef(cc.check, params)
+				if instances[ref] == nil {
+					instances[ref] = &instance{ref: ref, cc: cc, params: params, customized: customized}
+				}
+				controlRefs[pi][i] = append(controlRefs[pi][i], ref)
 			}
-			ref := checkRef(cc.check, params)
-			if instances[ref] == nil {
-				instances[ref] = &instance{ref: ref, cc: cc, params: params, customized: customized}
-			}
-			controlRefs[i] = append(controlRefs[i], ref)
 		}
 	}
 
@@ -179,7 +203,7 @@ func (e *Engine) Scan(ctx context.Context, h *hostfs.Host, opts Options) (*Resul
 
 	res := &Result{
 		SchemaVersion: SchemaVersion,
-		Profiles:      []ProfileInfo{{ID: profile.ID, Revision: profile.Revision, Digest: profileDigest(profile), Title: profile.Title}},
+		Profiles:      make([]ProfileInfo, 0, len(profiles)),
 		Summary:       map[string]ProfileSummary{},
 		Controls:      []ControlResult{},
 		Checks:        []CheckResult{},
@@ -189,22 +213,31 @@ func (e *Engine) Scan(ctx context.Context, h *hostfs.Host, opts Options) (*Resul
 	today := now().UTC().Truncate(24 * time.Hour)
 	res.Attestations = attestChecks(opts.Attestations, checks, res.Host.Hostname, today)
 	notes := waiveChecks(opts.Waivers, checks, res.Host.Hostname, today)
-	summary := ProfileSummary{Controls: map[Status]int{}, Checks: map[Status]int{}}
-	for i, ctl := range profile.Controls {
-		cr := aggregate(profile.ID, ctl, controlRefs[i], checks)
-		notes = append(notes, waiveControl(opts.Waivers, profile, &cr, checks, res.Host.Hostname, today)...)
-		cr.Customized = slices.ContainsFunc(cr.Checks, func(ref string) bool { return checks[ref].Customized })
-		summary.Controls[cr.Status]++
-		res.Controls = append(res.Controls, cr)
+	for pi, profile := range profiles {
+		res.Profiles = append(res.Profiles, ProfileInfo{ID: profile.ID, Revision: profile.Revision, Digest: e.content.ProfileDigest(profile), Title: profile.Title})
+		summary := ProfileSummary{Controls: map[Status]int{}, Checks: map[Status]int{}}
+		profileChecks := map[string]bool{}
+		for i, ctl := range profile.Controls {
+			cr := aggregate(profile.ID, ctl, controlRefs[pi][i], checks)
+			notes = append(notes, waiveControl(opts.Waivers, profile, e.content.ProfileDigest(profile), &cr, checks, res.Host.Hostname, today)...)
+			cr.Customized = slices.ContainsFunc(cr.Checks, func(ref string) bool { return checks[ref].Customized })
+			summary.Controls[cr.Status]++
+			res.Controls = append(res.Controls, cr)
+			for _, ref := range controlRefs[pi][i] {
+				profileChecks[ref] = true
+			}
+		}
+		for _, ref := range sortedKeys(profileChecks) {
+			summary.Checks[checks[ref].Status]++
+			if checks[ref].Customized {
+				summary.Customized++
+			}
+		}
+		res.Summary[profile.ID] = summary
 	}
 	for _, ref := range sortedKeys(checks) {
-		summary.Checks[checks[ref].Status]++
-		if checks[ref].Customized {
-			summary.Customized++
-		}
 		res.Checks = append(res.Checks, *checks[ref])
 	}
-	res.Summary[profile.ID] = summary
 	res.Waivers = notes
 	runs := map[string]*collected{hostCollectorName: hostc}
 	for name, c := range env.collected {
@@ -223,6 +256,7 @@ func (e *Engine) Scan(ctx context.Context, h *hostfs.Host, opts Options) (*Resul
 		Tool:       opts.Tool,
 		Target:     TargetInfo{Kind: "host", Root: h.Root},
 		Privileges: Privileges{EUID: int64(os.Geteuid())},
+		Packs:      slices.Clone(opts.Packs),
 	}
 	if !h.Live {
 		res.Scan.Target.Kind = "root"
@@ -343,8 +377,12 @@ func manualShow(c *Check) string {
 	return c.Manual.Show
 }
 
-// profileDigest covers the mapping, not titles.
-func profileDigest(p *Profile) string {
+// ProfileDigest is the digest of a profile: its mapping (controls, severities, checks, parameters; not
+// titles), and, for the checks of a policy pack that it maps, their logic. A waiver of a control of a
+// pack's profile names it, so it stops applying when the pack author changes what a mapped check of the
+// pack does as well as when the mapping changes. The digest of a built-in profile is its mapping only: what
+// a built-in check does belongs to the hostlint release.
+func (c *Content) ProfileDigest(p *Profile) string {
 	type ctl struct {
 		ID       string
 		Severity Severity
@@ -353,14 +391,22 @@ func profileDigest(p *Profile) string {
 		Params   map[string]map[string]any
 	}
 	ctls := make([]ctl, 0, len(p.Controls))
-	for _, c := range p.Controls {
-		ctls = append(ctls, ctl{c.ID, c.Severity, c.Checks, c.Manual != "", c.Params})
+	packChecks := map[string]string{}
+	for _, cc := range p.Controls {
+		ctls = append(ctls, ctl{cc.ID, cc.Severity, cc.Checks, cc.Manual != "", cc.Params})
+		for _, id := range cc.Checks {
+			if ch := c.Checks[id]; ch != nil && strings.HasPrefix(id, PackPrefix) { // the area of a pack's check
+				packChecks[id] = checkDigest(ch)
+			}
+		}
 	}
-	return "sha256:" + digestHex(struct {
+	doc := struct {
 		ID       string
 		Revision int
 		Controls []ctl
-	}{p.ID, p.Revision, ctls})
+		Pack     map[string]string `json:",omitempty"`
+	}{p.ID, p.Revision, ctls, packChecks}
+	return "sha256:" + digestHex(doc)
 }
 
 func digestHex(v any) string {
