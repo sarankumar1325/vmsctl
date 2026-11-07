@@ -1,4 +1,4 @@
-<!-- translated from docs/ci.md @ aa47e48 -->
+<!-- translated from docs/ci.md @ 2c3d72e -->
 # CI에서 hostlint 쓰기
 
 hostlint는 파이프라인에 맞춰 만들었습니다. 점검은 데몬도 네트워크 접근도 없는 명령 하나이고, 종료 코드는 고른
@@ -48,6 +48,7 @@ jobs:
 | `pack` | 저장소에 있는 [정책 팩](packs.ko.md)(직접 만든 점검과 프로파일 디렉터리), 팩의 프로파일은 `profile`로 선택 |
 | `fail-on` | `low`, `medium`, `high`(기본값), `none` |
 | `config` | [`hostlint.yaml`](configuration.ko.md): 더 엄격한 기준, 사유와 만료일이 있는 면제 |
+| `summary` | `true`(기본값): 점검이 단계를 실패시켜도 발견 사항의 Markdown 보고서를 실행의 작업 요약에 씁니다 |
 | `sarif-file` | 점검이 단계를 실패시켜도 SARIF를 여기에도 씁니다 |
 | `version` | 설치할 릴리스. 기본값은 액션이 고정된 릴리스(`@v0.15.0`) |
 
