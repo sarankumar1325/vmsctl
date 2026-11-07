@@ -72,6 +72,7 @@ func (s *Server) routesRead(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/controls", s.readAPI(s.handleControls))
 	mux.HandleFunc("GET /api/v1/controls/{profile}/{id}", s.readAPI(s.handleControl))
 	mux.HandleFunc("GET /api/v1/hosts/{id}", s.readAPI(s.handleHost))
+	mux.HandleFunc("GET /api/v1/hosts/{id}/agent", s.readAPI(s.handleHostAgent))
 	mux.HandleFunc("GET /api/v1/scans/{id}", s.readAPI(s.handleScan))
 	mux.HandleFunc("GET /api/v1/diff", s.readAPI(s.handleDiff))
 }
@@ -398,8 +399,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSession tells the dashboard whether its cookie is still good.
-func (s *Server) handleSession(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	cred, err := s.readCredential(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "a valid read token or session is required")
+		return
+	}
+	// canScan tells the dashboard whether to offer "scan now": only an operator may ask for one.
+	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true, "canScan": cred.Scope == ScopeOperator})
 }
 
 func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
