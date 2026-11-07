@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"path"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -38,8 +39,20 @@ var testUsers = []struct {
 // returns the cases that failed. Each case evaluates the check against the
 // fact documents it gives; collectors are not run.
 func (e *Engine) RunRuleTests(ctx context.Context) []TestFailure {
+	return e.runRuleTests(ctx, func(string) bool { return true })
+}
+
+// RunRuleTestsOf runs the tests of the checks with these IDs and of no other check: none, for no IDs.
+func (e *Engine) RunRuleTestsOf(ctx context.Context, ids []string) []TestFailure {
+	return e.runRuleTests(ctx, func(id string) bool { return slices.Contains(ids, id) })
+}
+
+func (e *Engine) runRuleTests(ctx context.Context, want func(id string) bool) []TestFailure {
 	var failures []TestFailure
 	for _, id := range sortedKeys(e.compiled) {
+		if !want(id) {
+			continue
+		}
 		cc := e.compiled[id]
 		for _, tc := range cc.check.Tests {
 			got, detail, err := e.runCase(ctx, cc, tc)
