@@ -71,6 +71,12 @@ sudo sh install.sh -v v0.21.0     # 먼저 읽어 보세요. root 없이 설치�
 sudo hostlint scan
 ```
 
+이미지로 실행할 수도 있습니다(호스트의 루트를 읽기 전용으로 마운트, [docs/container.ko.md](docs/container.ko.md)).
+
+```sh
+docker run --rm -v /:/host:ro ghcr.io/with-developer/hostlint:0.21.0 scan --root /host
+```
+
 [릴리스](https://github.com/with-developer/hostlint/releases)에는 `.deb`·`.rpm` 패키지, SBOM, 빌드
 출처 증명도 있습니다(`gh attestation verify 파일 -R with-developer/hostlint`). 직접 빌드하려면
 (Go 1.26 이상, 바이너리 자체는 의존성이 없습니다):
