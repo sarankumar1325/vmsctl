@@ -1,6 +1,6 @@
 # 0012. Policy packs: your own checks and profiles
 
-- Status: Accepted (the owner approved it on 2026-11-07, as proposed; see "Decisions")
+- Status: Accepted (the owner approved it on 2026-11-07, as proposed; see "Decisions"). The refusal of `--push` with a pack is superseded by [ADR 0016](0016-images-and-packs-in-the-fleet-server.md).
 - Date: 2026-11-07
 
 ## Context

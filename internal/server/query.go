@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/with-developer/hostlint/internal/engine"
 	"github.com/with-developer/hostlint/internal/signing"
 )
 
@@ -305,6 +306,8 @@ type HostDetail struct {
 	Profiles []string     `json:"profiles"`
 	Controls []ControlRow `json:"controls"`
 	Scans    []ScanRow    `json:"scans"`
+	// Packs are the policy packs the latest scan was made with (ADR 0012, 0016), "" of none.
+	Packs []engine.PackInfo `json:"packs"`
 }
 
 // Host returns one host.
@@ -319,7 +322,22 @@ func (s *Store) Host(ctx context.Context, id int64, staleAfter time.Duration, pr
 	d := &HostDetail{HostSummary: list[0]}
 	d.Controls = []ControlRow{}
 	d.Profiles = []string{}
+	d.Packs = []engine.PackInfo{}
 	if d.LatestScan != 0 {
+		// The packs belong to the views of a pack's profile (IDs start with x-) and to the view of every profile: on a
+		// built-in profile's page a pack would look like it governs controls it does not.
+		if profile == "" || strings.HasPrefix(profile, "x-") {
+			var raw string
+			if err := s.db.QueryRowContext(ctx, `SELECT packs FROM scans WHERE id = ?`, d.LatestScan).Scan(&raw); err != nil {
+				return nil, err
+			}
+			if raw != "" {
+				_ = json.Unmarshal([]byte(raw), &d.Packs) // written by packsJSON
+			}
+			if d.Packs == nil {
+				d.Packs = []engine.PackInfo{}
+			}
+		}
 		ps, err := s.db.QueryContext(ctx, `SELECT DISTINCT profile FROM scan_controls WHERE scan_row = ? ORDER BY profile`, d.LatestScan)
 		if err != nil {
 			return nil, err
