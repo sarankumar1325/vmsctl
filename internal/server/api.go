@@ -179,6 +179,13 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := HostFilter{Query: q.Get("q"), Status: q.Get("status"), StaleAfter: after, Sort: q.Get("sort"), Profile: profile, Kind: q.Get("kind")}
+	if f.Label = q.Get("label"); f.Label != "" {
+		// the sizes a result may carry, in bytes as the store counts them (a key has no "=": it would not split)
+		if k, v, ok := strings.Cut(f.Label, "="); !ok || k == "" || len(k) > maxLabelKey || len(v) > maxLabelValue {
+			writeError(w, http.StatusBadRequest, `label is "key=value"`)
+			return
+		}
+	}
 	if f.Kind != "" && f.Kind != kindHost && f.Kind != kindImage {
 		writeError(w, http.StatusBadRequest, `kind is "host" or "image"`)
 		return
