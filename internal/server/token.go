@@ -71,6 +71,9 @@ func (s *Store) CreateCredential(ctx context.Context, scope, name, boundName str
 	}
 	var bound any
 	if boundName != "" {
+		if err := checkBoundName(scope, boundName); err != nil {
+			return "", 0, err
+		}
 		bound = boundName
 	}
 	// The token and its audit row are one transaction: no credential exists without its record.
@@ -219,4 +222,31 @@ func (s *Store) RevokeCredential(ctx context.Context, id int64) (bool, error) {
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+// checkBoundName allows what an ingest token may be bound to: one name, or the names that start with a prefix
+// ("ghcr.io/acme/*", for the CI of an organization that pushes many images). A prefix ends with "/*" after an owner, so it
+// stops at a path boundary ("ghcr.io/acme*" would take ghcr.io/acme-evil too): "*" alone is --any-host, a choice of its own.
+func checkBoundName(scope, name string) error {
+	if !strings.Contains(name, "*") {
+		return nil
+	}
+	prefix, ok := strings.CutSuffix(name, "*")
+	switch {
+	case scope != ScopeIngest:
+		return errors.New("only an ingest token is bound to a host or a prefix")
+	case !ok || strings.Contains(prefix, "*"):
+		return errors.New("a prefix has one *, at the end: ghcr.io/acme/*")
+	case len(prefix) < 3 || !strings.HasSuffix(prefix, "/"):
+		return errors.New("a prefix ends with /* after an owner: ghcr.io/acme/* (use --any-host to speak for every name)")
+	}
+	return nil
+}
+
+// boundMatches reports whether a token bound to bound may speak for name: the name itself, or any name under a prefix.
+func boundMatches(bound, name string) bool {
+	if prefix, ok := strings.CutSuffix(bound, "*"); ok {
+		return strings.HasPrefix(name, prefix)
+	}
+	return bound == name
 }

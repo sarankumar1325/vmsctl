@@ -44,6 +44,10 @@ type Image struct {
 	Label string
 	// Layers is how many layers were applied.
 	Layers int
+	// Ref is the reference (repository and tag) the archive names the image with, "" when it names none (then Label is
+	// the file name). Digest is the image ID: the sha256 of its configuration, as `docker images --no-trunc` shows it.
+	Ref    string
+	Digest string
 }
 
 // Load reads the archive at file. It honors ctx while it reads.
@@ -98,7 +102,11 @@ func Load(ctx context.Context, file string) (img *Image, err error) {
 			return nil, fmt.Errorf("layer %d (%q): %w", i+1, l.name, err)
 		}
 	}
-	return &Image{FS: b.Finish(), Label: p.label, Layers: len(p.layers)}, nil
+	loaded := &Image{FS: b.Finish(), Label: p.label, Layers: len(p.layers), Digest: p.configDigest}
+	if p.fromRef {
+		loaded.Ref = p.label
+	}
+	return loaded, nil
 }
 
 func compression(b []byte) string {
@@ -207,9 +215,11 @@ type layerRef struct {
 }
 
 type plan struct {
-	label   string
-	layers  []layerRef
-	diffIDs []string // hex sha256 of each layer unpacked, from the image configuration
+	label        string
+	fromRef      bool   // the label is a reference the archive names, not the file name
+	configDigest string // "sha256:" and the hex of the image configuration: the image ID
+	layers       []layerRef
+	diffIDs      []string // hex sha256 of each layer unpacked, from the image configuration
 }
 
 type descriptor struct {
@@ -253,8 +263,9 @@ func readPlan(f *os.File, idx map[string]outerEntry, fallbackLabel string) (*pla
 		e := entries[0]
 		configName = e.Config
 		p.label = fallbackLabel
-		if len(e.RepoTags) > 0 {
+		if len(e.RepoTags) > 0 && e.RepoTags[0] != "" && e.RepoTags[0] != "<none>:<none>" {
 			p.label = e.RepoTags[0]
+			p.fromRef = true
 		}
 		for _, l := range e.Layers {
 			ref := layerRef{name: strings.TrimPrefix(path.Clean("/"+l), "/")}
@@ -286,6 +297,7 @@ func readPlan(f *os.File, idx map[string]outerEntry, fallbackLabel string) (*pla
 	if hex, ok := blobHex(strings.TrimPrefix(path.Clean("/"+configName), "/")); ok && hex != sum(raw) {
 		return nil, errors.New("the image configuration does not match its digest")
 	}
+	p.configDigest = "sha256:" + sum(raw)
 	var cfg imageConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, fmt.Errorf("the image configuration: %w", err)
@@ -358,9 +370,12 @@ func readOCI(f *os.File, idx map[string]outerEntry, p *plan, configName *string,
 		p.layers = append(p.layers, layerRef{name: name, digest: hex})
 	}
 	p.label = fallbackLabel
-	for _, key := range []string{"org.opencontainers.image.ref.name", "io.containerd.image.name"} {
+	// io.containerd.image.name holds the full reference; ref.name is often only a tag ("latest"), which is a label to
+	// show but not a name for the image.
+	for _, key := range []string{"io.containerd.image.name", "org.opencontainers.image.ref.name"} {
 		if v := d.Annotations[key]; v != "" {
 			p.label = v
+			p.fromRef = strings.ContainsAny(v, ":/@") // a repository, or a tag with one
 			break
 		}
 	}
