@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -22,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	_ "modernc.org/sqlite" // the pure-Go SQLite driver: the binary stays static
@@ -304,6 +306,12 @@ func (s *Store) IngestScan(ctx context.Context, cred *Credential, res *engine.Re
 	if err != nil {
 		return nil, err
 	}
+	// What the list shows of the host comes from the result just stored, not from a retry of an older one (which
+	// returned above).
+	osName, labels := hostInfo(res)
+	if _, err := tx.ExecContext(ctx, `UPDATE hosts SET os = ?, labels = ? WHERE id = ?`, osName, labels, hostRow); err != nil {
+		return nil, err
+	}
 	insControl, err := tx.PrepareContext(ctx, `INSERT INTO scan_controls (scan_row, profile, control_id, severity, status, title) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, err
@@ -457,4 +465,58 @@ func (s *Store) VerifyAudit(ctx context.Context) (rows int, last string, err err
 		rows++
 	}
 	return rows, prev, rs.Err()
+}
+
+// maxLabels and the lengths bound what a result may put in the host list: it is shown on every page.
+const (
+	maxLabels     = 10
+	maxLabelKey   = 32
+	maxLabelValue = 64
+	maxOSName     = 100
+)
+
+// hostInfo is the operating system name and the labels (as JSON) the host list keeps of a result: bounded, and
+// only printable text, so what a host says about itself cannot break the page that shows it.
+func hostInfo(res *engine.Result) (osName, labels string) {
+	osName = strings.TrimSpace(res.Host.OS.Name)
+	if !plainText(osName) { // a name with a stray control character falls back to the ID and version
+		osName = ""
+	}
+	if osName == "" {
+		osName = strings.TrimSpace(res.Host.OS.ID + " " + res.Host.OS.VersionID)
+		if !plainText(osName) {
+			osName = ""
+		}
+	}
+	osName = truncate(osName, maxOSName)
+	keys := make([]string, 0, len(res.Host.Labels))
+	for k := range res.Host.Labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	kept := map[string]string{}
+	for _, k := range keys {
+		v := res.Host.Labels[k]
+		if len(kept) == maxLabels {
+			break
+		}
+		if k == "" || len(k) > maxLabelKey || len(v) > maxLabelValue || !plainText(k) || !plainText(v) {
+			continue
+		}
+		kept[k] = v
+	}
+	if len(kept) == 0 {
+		return osName, ""
+	}
+	b, err := json.Marshal(kept)
+	if err != nil {
+		return osName, ""
+	}
+	return osName, string(b)
+}
+
+// plainText is valid UTF-8 with no control characters and no format characters (the right-to-left override and the
+// zero-width ones among them): text a host chose that the list shows beside names the reader trusts.
+func plainText(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) })
 }

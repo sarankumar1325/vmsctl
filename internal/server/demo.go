@@ -11,6 +11,7 @@ import (
 	"hash/fnv"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/with-developer/hostlint/internal/engine"
@@ -124,7 +125,7 @@ func demoResult(content *engine.Content, profile *engine.Profile, h demoHost, da
 		Host: engine.HostInfo{
 			Hostname: h.name, HostID: hex.EncodeToString(fnvSum(h.name)),
 			OS:   engine.OSInfo{ID: h.family, Family: h.family, Name: h.os, Supported: true},
-			Arch: "amd64",
+			Arch: "amd64", Labels: demoLabels(h.name),
 		},
 		Profiles: []engine.ProfileInfo{{ID: profile.ID, Revision: profile.Revision, Digest: digest, Title: profile.Title}},
 		Summary:  map[string]engine.ProfileSummary{},
@@ -147,11 +148,15 @@ func demoResult(content *engine.Content, profile *engine.Profile, h demoHost, da
 			}
 			st := demoCheckStatus(check, ctl.ID, mixed, h, failRate)
 			cr.Checks = append(cr.Checks, id)
-			res.Checks = append(res.Checks, engine.CheckResult{
+			cres := engine.CheckResult{
 				Ref: id, ID: id, Version: check.Version, Digest: digest, Title: check.Title, TitleKo: check.TitleKo, Severity: check.Severity,
 				Status: st, StatusSource: "observed", Reason: demoReason(st),
 				Evidence: demoEvidence(st, id), DurationMs: 3,
-			})
+			}
+			if st == engine.StatusFail { // as a real scan does: the rule's own guidance on a failed check
+				cres.Remediation = truncate(strings.TrimSpace(check.Remediation), maxRemediation)
+			}
+			res.Checks = append(res.Checks, cres)
 			if rank(st) > rank(worst) {
 				worst = st
 			}
@@ -251,4 +256,14 @@ func demoEvidence(st engine.Status, id string) []engine.Evidence {
 		return []engine.Evidence{}
 	}
 	return []engine.Evidence{}
+}
+
+// demoLabels are the labels of a made-up host: its role, from its name, and where it runs.
+func demoLabels(name string) map[string]string {
+	role, _, _ := strings.Cut(name, "-")
+	env := "prod"
+	if name == "web-03" || name == "cache-01" {
+		env = "staging"
+	}
+	return map[string]string{"role": role, "env": env}
 }
