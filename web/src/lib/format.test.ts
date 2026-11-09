@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ago, compareControls, ctitle, hue, parseRoute, percent, score, total } from "./format";
+import { ago, compareControls, ctitle, hashParams, hostsAddress, hue, isHostsList, parseHostsView, parseRoute, percent, score, total } from "./format";
 
 const t = (key: string, n?: number) => `${key}:${n ?? ""}`;
 
@@ -49,6 +49,7 @@ describe("ctitle", () => {
 describe("parseRoute and total", () => {
   it("splits and decodes", () => {
     expect(parseRoute("#/hosts/3")).toEqual(["hosts", "3"]);
+    expect(parseRoute("#/hosts?status=failing&q=a/b")).toEqual(["hosts"]);
     expect(parseRoute("#/")).toEqual([]);
     expect(parseRoute("")).toEqual([]);
     expect(parseRoute("#/a%20b")).toEqual(["a b"]);
@@ -58,9 +59,38 @@ describe("parseRoute and total", () => {
     expect(parseRoute("#/hosts/%E0%A4%A")).toEqual(["hosts", "%E0%A4%A"]);
     expect(parseRoute("#/%")).toEqual(["%"]);
   });
+  it("reads the query of a route", () => {
+    const p = hashParams("#/hosts?status=failing&label=env%3Dprod&q=web%2001");
+    expect(p.get("status")).toBe("failing");
+    expect(p.get("label")).toBe("env=prod");
+    expect(p.get("q")).toBe("web 01");
+    expect(hashParams("#/hosts").get("status")).toBeNull();
+    expect(hashParams("").toString()).toBe("");
+  });
   it("gives a name a stable hue", () => {
     expect(hue("web-01")).toBe(hue("web-01"));
     expect(hue("web-01")).toBeGreaterThanOrEqual(0);
     expect(hue("web-01")).toBeLessThan(360);
+  });
+});
+
+describe("the address of the host list", () => {
+  it("leaves the defaults out and round-trips the filters", () => {
+    expect(hostsAddress({ q: "", filter: "", sort: "name", label: "" })).toBe("#/hosts");
+    const v = { q: "web 01+a", filter: "failing" as const, sort: "score" as const, label: "env=prod" };
+    const a = hostsAddress(v);
+    expect(a).toBe("#/hosts?q=web+01%2Ba&status=failing&sort=score&label=env%3Dprod");
+    expect(parseHostsView(a)).toEqual(v);
+  });
+  it("takes an unknown status or sort as the default", () => {
+    expect(parseHostsView("#/hosts?status=bogus&sort=nope")).toEqual({ q: "", filter: "", sort: "name", label: "" });
+    expect(parseHostsView("#/hosts")).toEqual({ q: "", filter: "", sort: "name", label: "" });
+  });
+  it("tells the list from a host page", () => {
+    expect(isHostsList("#/hosts")).toBe(true);
+    expect(isHostsList("#/hosts?status=stale")).toBe(true);
+    expect(isHostsList("#/hosts/3")).toBe(false);
+    expect(isHostsList("#/hosts/abc")).toBe(false);
+    expect(isHostsList("#/images")).toBe(false);
   });
 });
