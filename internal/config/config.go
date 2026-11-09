@@ -1,5 +1,5 @@
-// Package config reads hostlint.yaml: the profile to scan with, stricter
-// check parameters, and waivers (ADR 0006 §4, §6). It is hostlint's own
+// Package config reads vmsctl.yaml: the profile to scan with, stricter
+// check parameters, and waivers (ADR 0006 §4, §6). It is vmsctl's own
 // configuration on the machine that runs it, not a file of the scanned host,
 // so it is read directly rather than through internal/hostfs.
 package config
@@ -19,11 +19,11 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/with-developer/hostlint/internal/engine"
-	"github.com/with-developer/hostlint/internal/hostfs"
+	"github.com/with-developer/vmsctl/internal/engine"
+	"github.com/with-developer/vmsctl/internal/hostfs"
 )
 
-// File is the content of hostlint.yaml.
+// File is the content of vmsctl.yaml.
 type File struct {
 	// Profile is the profile to scan with when --profile is not given.
 	Profile string `yaml:"profile"`
@@ -77,27 +77,49 @@ type Waiver struct {
 	Hosts []string `yaml:"hosts"`
 }
 
-// Locations are searched in order when no file is named.
-var Locations = []string{"hostlint.yaml", "/etc/hostlint/hostlint.yaml"}
+// Locations are searched in order when no file is named. Each place lists the name of the file there and, after
+// it, the name it had before the project was renamed (ADR 0017).
+var Locations = [][]string{
+	{"vmsctl.yaml", "hostlint.yaml"},
+	{"/etc/vmsctl/vmsctl.yaml", "/etc/hostlint/hostlint.yaml"},
+}
+
+// LegacyName reports whether a configuration file has the name it had before the rename.
+func LegacyName(name string) bool { return path.Base(name) == "hostlint.yaml" }
 
 // Find returns the configuration file to use: explicit when given (it must
-// exist), else the first of Locations that exists, else "".
+// exist), else the first place of Locations that has one, else "". A place that
+// has both the new name and the old one uses the new one: the old file may be
+// there for hosts that still run a release before v0.27.0, which read only that
+// name.
 func Find(explicit string) (string, error) {
+	path, _, err := FindNotes(explicit)
+	return path, err
+}
+
+// FindNotes is Find, and also the files it did not use because the new name of the same place won.
+func FindNotes(explicit string) (path string, unused []string, err error) {
 	if explicit != "" {
 		if _, err := os.Stat(explicit); err != nil {
-			return "", fmt.Errorf("--config: %w", err)
+			return "", nil, fmt.Errorf("--config: %w", err)
 		}
-		return explicit, nil
+		return explicit, nil, nil
 	}
-	for _, p := range Locations {
-		switch _, err := os.Stat(p); {
-		case err == nil:
-			return p, nil
-		case !errors.Is(err, fs.ErrNotExist):
-			return "", err
+	for _, place := range Locations {
+		var found []string
+		for _, p := range place {
+			switch _, err := os.Stat(p); {
+			case err == nil:
+				found = append(found, p)
+			case !errors.Is(err, fs.ErrNotExist):
+				return "", nil, err
+			}
+		}
+		if len(found) > 0 {
+			return found[0], found[1:], nil
 		}
 	}
-	return "", nil
+	return "", nil, nil
 }
 
 // maxFile is the largest configuration file.
@@ -105,7 +127,7 @@ const maxFile = 1 << 20
 
 // Load reads a configuration file strictly: unknown keys are errors. Waivers
 // can hide findings, so the file must be one nobody else could have planted
-// or changed: a regular file owned by root or by the user running hostlint,
+// or changed: a regular file owned by root or by the user running vmsctl,
 // not writable by group or others. The check is made on the open file.
 func Load(name string) (*File, error) {
 	// Opening a FIFO blocks until a writer appears, so look before opening.
@@ -215,7 +237,7 @@ func (f *File) ValidateProfiles(content *engine.Content, profileIDs []string) er
 		case w.Check != "" && (w.Revision != 0 || w.Profile != "" || w.Digest != ""):
 			add("%s: revision, profile and digest only apply to control waivers", where)
 		case w.Control != "" && strings.HasPrefix(profile.ID, engine.PackPrefix) && w.Digest == "":
-			add("%s: a waiver of a control of the pack's profile %s needs its digest (digest: %s, shown in the result and by hostlint pack show)", where, profile.ID, content.ProfileDigest(profile))
+			add("%s: a waiver of a control of the pack's profile %s needs its digest (digest: %s, shown in the result and by vmsctl pack show)", where, profile.ID, content.ProfileDigest(profile))
 		}
 		if w.Control != "" && w.Errors {
 			add("%s: errors applies to check waivers; a control with an ERROR check is not waived (waive its checks with errors: true)", where)
@@ -331,10 +353,10 @@ func trusted(name string, fi os.FileInfo) error {
 	case !fi.Mode().IsRegular():
 		return fmt.Errorf("%s: not a regular file", name)
 	case fi.Mode().Perm()&0o022 != 0:
-		return fmt.Errorf("%s: writable by group or others (mode %04o); hostlint does not trust it", name, fi.Mode().Perm())
+		return fmt.Errorf("%s: writable by group or others (mode %04o); vmsctl does not trust it", name, fi.Mode().Perm())
 	}
 	if uid, ok := hostfs.Owner(fi); ok && uid != 0 && int64(uid) != int64(os.Getuid()) {
-		return fmt.Errorf("%s: owned by uid %d, neither root nor you; hostlint does not trust it", name, uid)
+		return fmt.Errorf("%s: owned by uid %d, neither root nor you; vmsctl does not trust it", name, uid)
 	}
 	return nil
 }
