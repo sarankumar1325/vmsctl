@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/hooks";
 import { useI18n } from "../lib/i18n";
-import { compareControls, ctitle } from "../lib/format";
+import { compareControls, controlsAddress, ctitle, parseControlsView } from "../lib/format";
+import { lastListAddress, useListAddress } from "../lib/listAddress";
 import { Avatar, Await, Empty, Inline, PageHeader, Severity, Skeleton, StatusBadge, StatusBar } from "../components/ui";
 import { IconSearch } from "../components/icons";
 import { STATUSES, type Status } from "../lib/types";
@@ -11,8 +12,20 @@ import { STALE_DAYS } from "./Overview";
 export function ControlsPage() {
   const { t, lang } = useI18n();
   const state = useAsync(() => api.controls(), []);
-  const [q, setQ] = useState("");
-  const [failing, setFailing] = useState(false);
+  const [initial] = useState(() => parseControlsView(location.hash));
+  const [q, setQ] = useState(initial.q);
+  const [failing, setFailing] = useState(initial.failing);
+  // The filters are in the address, as on the host list.
+  useListAddress(
+    "controls",
+    { q, failing },
+    (v) => {
+      setQ(v.q);
+      setFailing(v.failing);
+    },
+    parseControlsView,
+    controlsAddress,
+  );
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return (state.data?.controls ?? [])
@@ -87,7 +100,7 @@ export function ControlPage({ profile, id }: { profile: string; id: string }) {
   return (
     <>
       <p className="crumb">
-        <a href="#/controls">{t("controls.back")}</a>
+        <a href={lastListAddress("controls")}>{t("controls.back")}</a>
       </p>
       <Await state={state}>
         {({ control: c, info }) => {
