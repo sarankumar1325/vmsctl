@@ -7,7 +7,9 @@ description: >-
   SELinux: /etc/selinux/config sets SELINUX=enforcing (permissive only logs what the policy would have denied, and disabled loads no policy). AppArmor:
   the apparmor package is installed and its unit is enabled, which is what Ubuntu and Debian do by default. This reads what the next boot does, not the
   running kernel: a kernel started without the module (a boot parameter, or a kernel that was built without it) or `setenforce 0` since boot is not seen here.
-  A host that confines its services another way, such as a hardened container runtime around it, is a choice to record as a waiver with its reason.
+  Only these two are looked for: SELinux on any host with its configuration file, AppArmor on a Debian-style host (the supported RHEL relatives use SELinux). Without
+  systemd the units of AppArmor cannot be read, so the check applies only where SELinux has a configuration file. A host that confines its services another way, such
+  as a hardened container runtime around it, is a choice to record as a waiver with its reason.
 rationale: >-
   Mandatory access control limits what a compromised service can reach, whatever its own permissions are: a flaw in a web server then does not hand over the
   rest of the host.
@@ -15,7 +17,7 @@ remediation: >-
   RHEL and its relatives: set `SELINUX=enforcing` in /etc/selinux/config and run `setenforce 1` (after a time with SELinux disabled, label the files first with
   `touch /.autorelabel` and reboot). Debian and Ubuntu: `apt install apparmor apparmor-utils` and `systemctl enable --now apparmor`.
 applies: >-
-  !target.image && services.systemd && (packages.manager == "dpkg" || packages.manager == "rpm")
+  !target.image && (packages.manager == "dpkg" || packages.manager == "rpm") && (services.systemd || mac.selinux.present)
 expect: >-
   (mac.selinux.present && "mode" in mac.selinux.settings && mac.selinux.settings["mode"].value == "enforcing") ||
   (packages.manager == "dpkg" && "apparmor" in packages.installed &&
@@ -98,3 +100,15 @@ tests:
       mac: {selinux: {present: false, settings: {}}}
       services: {systemd: true, units: {}}
     want: ERROR
+  - name: no systemd, and SELinux is disabled in its file (the file decides without units)
+    facts:
+      packages: {manager: rpm, installed: {}}
+      mac: {selinux: {present: true, settings: {mode: {value: disabled, explicit: true, source: "/etc/selinux/config:7"}}}}
+      services: {systemd: false, units: {}}
+    want: FAIL
+  - name: no systemd, and SELinux is enforcing in its file
+    facts:
+      packages: {manager: rpm, installed: {}}
+      mac: {selinux: {present: true, settings: {mode: {value: enforcing, explicit: true, source: "/etc/selinux/config:7"}}}}
+      services: {systemd: false, units: {}}
+    want: PASS

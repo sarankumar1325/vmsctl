@@ -47,10 +47,11 @@ func (macCollector) Collect(_ context.Context, h *hostfs.Host) (engine.Facts, er
 		return engine.Facts{Value: f, Complete: false, Skipped: []string{fmt.Sprintf("%s: %v", selinuxConfig, err)}}, nil
 	}
 	f.Selinux.Present = true
-	for key, name := range map[string]string{"SELINUX": "mode", "SELINUXTYPE": "type"} {
-		if v, ok := shellAssignment(selinuxConfig, data, key); ok {
-			f.Selinux.Settings[name] = v
-		}
+	if v, ok := shellAssignment(selinuxConfig, data, "SELINUX"); ok {
+		f.Selinux.Settings["mode"] = v
+	}
+	if v, ok := shellAssignment(selinuxConfig, data, "SELINUXTYPE"); ok {
+		f.Selinux.Settings["type"] = v
 	}
 	return engine.Facts{Value: f, Complete: true}, nil
 }
